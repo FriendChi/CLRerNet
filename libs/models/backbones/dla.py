@@ -31,6 +31,20 @@ def conv3x3(in_planes, out_planes, stride=1):
         in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False
     )
 
+class SimAM(torch.nn.Module):
+    def __init__(self, e_lambda=1e-4):
+        super(SimAM, self).__init__()
+        self.activaton = nn.Sigmoid()
+        self.e_lambda = e_lambda
+
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+        n = w * h - 1
+        x_minus_mu_square = (x - x.mean(dim=[2, 3], keepdim=True)).pow(2)
+        y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + self.e_lambda)) + 0.5
+
+        return x * self.activaton(y)
 
 class BasicBlock(nn.Module):
     def __init__(self, inplanes, planes, stride=1, dilation=1):
@@ -55,6 +69,7 @@ class BasicBlock(nn.Module):
             bias=False,
             dilation=dilation,
         )
+        self.sam = SimAM()
         self.bn2 = nn.BatchNorm2d(planes, momentum=BN_MOMENTUM)
         self.stride = stride
 
@@ -67,6 +82,7 @@ class BasicBlock(nn.Module):
         out = self.relu(out)
 
         out = self.conv2(out)
+        out = self.sam(out)
         out = self.bn2(out)
 
         out += residual

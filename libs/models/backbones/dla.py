@@ -1,454 +1,111 @@
 """
 Adapted from:
-https://github.com/Turoad/CLRNet/blob/main/clrnet/models/backbones/dla34.py
+https://github.com/Turoad/CLRNet/blob/main/clrnet/models/necks/fpn.py
 """
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 
-import math
-import logging
-from os.path import join
+import torch.nn as nn
+import torch.nn.functional as F
 
+from mmcv.cnn import ConvModule
+from mmdet.models.builder import NECKS
 import torch
-from torch import nn
-import torch.utils.model_zoo as model_zoo
-from mmdet.models.builder import BACKBONES
+
+@NECKS.register_module
+class CLRerNetFPN(nn.Module):
+    def __init__(self, in_channels, out_channels, num_outs):
+        """
+        Feature pyramid network for CLRerNet.
+        Args:
+            in_channels (List[int]): Channel number list. 输入的特征图通道数列表。
+            out_channels (int): Number of output feature map channels. 输出特征图的通道数。
+            num_outs (int): Number of output feature map levels. 输出特征图的层数。
+        """
+        super(CLRerNetFPN, self).__init__()  # 调用父类的初始化方法，初始化 nn.Module
+        assert isinstance(in_channels, list)  # 确保 in_channels 是一个列表
+        self.in_channels = in_channels  # 保存输入通道列表
+        self.out_channels = out_channels  # 保存输出通道数
+        self.num_ins = len(in_channels)  # 输入的特征图数量（等于 in_channels 的长度）
+        self.num_outs = num_outs  # 输出特征图的层数
+
+        self.backbone_end_level = self.num_ins  # 设置骨干网络的结束层（即输入的层数）
+        self.start_level = 0  # 设置起始层，通常为 0
+        self.lateral_convs = nn.ModuleList()  # 用于存储 lateral 卷积层的列表
+        self.fpn_convs = nn.ModuleList()  # 用于存储 FPN 卷积层的列表
+        
+        self.weights_laterals = nn.ParameterList()  # 存储对 `laterals[i - 1]` 的权重
+        self.weights_upsampled = nn.ParameterList()  # 存储对 `upsampled` 的权重
 
 
-BN_MOMENTUM = 0.1
-logger = logging.getLogger(__name__)
-
-
-def get_model_url(data='imagenet', name='dla34', hash='ba72cf86'):
-    return join('http://dl.yf.io/dla/models', data, '{}-{}.pth'.format(name, hash))
-
-
-def conv3x3(in_planes, out_planes, stride=1):
-    "3x3 convolution with padding"
-    return nn.Conv2d(
-        in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False
-    )
-
-
-class BasicBlock(nn.Module):
-    def __init__(self, inplanes, planes, stride=1, dilation=1):
-        super(BasicBlock, self).__init__()
-        self.conv1 = nn.Conv2d(
-            inplanes,
-            planes,
-            kernel_size=3,
-            stride=stride,
-            padding=dilation,
-            bias=False,
-            dilation=dilation,
-        )
-        self.bn1 = nn.BatchNorm2d(planes, momentum=BN_MOMENTUM)
-        self.relu = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv2d(
-            planes,
-            planes,
-            kernel_size=3,
-            stride=1,
-            padding=dilation,
-            bias=False,
-            dilation=dilation,
-        )
-        self.bn2 = nn.BatchNorm2d(planes, momentum=BN_MOMENTUM)
-        self.stride = stride
-
-    def forward(self, x, residual=None):
-        if residual is None:
-            residual = x
-
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-
-        out = self.conv2(out)
-        out = self.bn2(out)
-
-        out += residual
-        out = self.relu(out)
-
-        return out
-
-
-class Bottleneck(nn.Module):
-    expansion = 2
-
-    def __init__(self, inplanes, planes, stride=1, dilation=1):
-        super(Bottleneck, self).__init__()
-        expansion = Bottleneck.expansion
-        bottle_planes = planes // expansion
-        self.conv1 = nn.Conv2d(inplanes, bottle_planes, kernel_size=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(bottle_planes, momentum=BN_MOMENTUM)
-        self.conv2 = nn.Conv2d(
-            bottle_planes,
-            bottle_planes,
-            kernel_size=3,
-            stride=stride,
-            padding=dilation,
-            bias=False,
-            dilation=dilation,
-        )
-        self.bn2 = nn.BatchNorm2d(bottle_planes, momentum=BN_MOMENTUM)
-        self.conv3 = nn.Conv2d(bottle_planes, planes, kernel_size=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(planes, momentum=BN_MOMENTUM)
-        self.relu = nn.ReLU(inplace=True)
-        self.stride = stride
-
-    def forward(self, x, residual=None):
-        if residual is None:
-            residual = x
-
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-
-        out = self.conv2(out)
-        out = self.bn2(out)
-        out = self.relu(out)
-
-        out = self.conv3(out)
-        out = self.bn3(out)
-
-        out += residual
-        out = self.relu(out)
-
-        return out
-
-
-class BottleneckX(nn.Module):
-    expansion = 2
-    cardinality = 32
-
-    def __init__(self, inplanes, planes, stride=1, dilation=1):
-        super(BottleneckX, self).__init__()
-        cardinality = BottleneckX.cardinality
-        # dim = int(math.floor(planes * (BottleneckV5.expansion / 64.0)))
-        # bottle_planes = dim * cardinality
-        bottle_planes = planes * cardinality // 32
-        self.conv1 = nn.Conv2d(inplanes, bottle_planes, kernel_size=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(bottle_planes, momentum=BN_MOMENTUM)
-        self.conv2 = nn.Conv2d(
-            bottle_planes,
-            bottle_planes,
-            kernel_size=3,
-            stride=stride,
-            padding=dilation,
-            bias=False,
-            dilation=dilation,
-            groups=cardinality,
-        )
-        self.bn2 = nn.BatchNorm2d(bottle_planes, momentum=BN_MOMENTUM)
-        self.conv3 = nn.Conv2d(bottle_planes, planes, kernel_size=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(planes, momentum=BN_MOMENTUM)
-        self.relu = nn.ReLU(inplace=True)
-        self.stride = stride
-
-    def forward(self, x, residual=None):
-        if residual is None:
-            residual = x
-
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-
-        out = self.conv2(out)
-        out = self.bn2(out)
-        out = self.relu(out)
-
-        out = self.conv3(out)
-        out = self.bn3(out)
-
-        out += residual
-        out = self.relu(out)
-
-        return out
-
-
-class Root(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, residual):
-        super(Root, self).__init__()
-        self.conv = nn.Conv2d(
-            in_channels,
-            out_channels,
-            1,
-            stride=1,
-            bias=False,
-            padding=(kernel_size - 1) // 2,
-        )
-        self.bn = nn.BatchNorm2d(out_channels, momentum=BN_MOMENTUM)
-        self.relu = nn.ReLU(inplace=True)
-        self.residual = residual
-
-    def forward(self, *x):
-        children = x
-        x = self.conv(torch.cat(x, 1))
-        x = self.bn(x)
-        if self.residual:
-            x += children[0]
-        x = self.relu(x)
-
-        return x
-
-
-class Tree(nn.Module):
-    def __init__(
-        self,
-        levels,
-        block,
-        in_channels,
-        out_channels,
-        stride=1,
-        level_root=False,
-        root_dim=0,
-        root_kernel_size=1,
-        dilation=1,
-        root_residual=False,
-    ):
-        super(Tree, self).__init__()
-        if root_dim == 0:
-            root_dim = 2 * out_channels
-        if level_root:
-            root_dim += in_channels
-        if levels == 1:
-            self.tree1 = block(in_channels, out_channels, stride, dilation=dilation)
-            self.tree2 = block(out_channels, out_channels, 1, dilation=dilation)
-        else:
-            self.tree1 = Tree(
-                levels - 1,
-                block,
-                in_channels,
-                out_channels,
-                stride,
-                root_dim=0,
-                root_kernel_size=root_kernel_size,
-                dilation=dilation,
-                root_residual=root_residual,
+        # 初始化 lateral 卷积和 FPN 卷积层
+        for i in range(self.start_level, self.backbone_end_level):
+            #横向卷积层,1*1卷积用于保持通道统一
+            l_conv = ConvModule(
+                in_channels[i],  # 输入通道数
+                out_channels,  # 输出通道数
+                1,  # 卷积核大小为 1
+                conv_cfg=None,  # 卷积配置（未指定）
+                norm_cfg=None,  # 归一化配置（未指定）
+                act_cfg=None,  # 激活函数配置（未指定）
+                inplace=False,
             )
-            self.tree2 = Tree(
-                levels - 1,
-                block,
-                out_channels,
-                out_channels,
-                root_dim=root_dim + out_channels,
-                root_kernel_size=root_kernel_size,
-                dilation=dilation,
-                root_residual=root_residual,
-            )
-        if levels == 1:
-            self.root = Root(root_dim, out_channels, root_kernel_size, root_residual)
-        self.level_root = level_root
-        self.root_dim = root_dim
-        self.downsample = None
-        self.project = None
-        self.levels = levels
-        if stride > 1:
-            self.downsample = nn.MaxPool2d(stride, stride=stride)
-        if levels == 1 and in_channels != out_channels:
-            self.project = nn.Sequential(
-                nn.Conv2d(
-                    in_channels, out_channels, kernel_size=1, stride=1, bias=False
-                ),
-                nn.BatchNorm2d(out_channels, momentum=BN_MOMENTUM),
+            # FPN 卷积层，处理后的通道和尺寸都不变
+            fpn_conv = ConvModule(
+                out_channels,  # 输入通道数为输出通道数
+                out_channels,  # 输出通道数
+                3,  # 卷积核大小为 3
+                padding=1,  # padding 为 1
+                conv_cfg=None,  # 卷积配置（未指定）
+                norm_cfg=None,  # 归一化配置（未指定）
+                act_cfg=None,  # 激活函数配置（未指定）
+                inplace=False,
             )
 
-    def forward(self, x, residual=None, children=None):
-        children = [] if children is None else children
-        bottom = self.downsample(x) if self.downsample else x
-        residual = self.project(bottom) if self.project else bottom
-        if self.level_root:
-            children.append(bottom)
-        x1 = self.tree1(x, residual)
-        if self.levels == 1:
-            x2 = self.tree2(x1)
-            x = self.root(x2, x1, *children)
-        else:
-            children.append(x1)
-            x = self.tree2(x1, children=children)
-        return x
+            self.lateral_convs.append(l_conv)  # 将 lateral 卷积层添加到列表中
+            self.fpn_convs.append(fpn_conv)  # 将 FPN 卷积层添加到列表中
 
+        for i in range(len(self.lateral_convs)-1):
+            self.weights_laterals.append(nn.Parameter(torch.ones(1)))  
+            self.weights_upsampled.append(nn.Parameter(torch.ones(1)))  
+    def forward(self, inputs):
+        """
+        Args:
+            inputs (List[torch.Tensor]): Input feature maps.
+              Example of shapes:
+                ([1, 64, 80, 200], [1, 128, 40, 100], [1, 256, 20, 50], [1, 512, 10, 25]).
+        Returns:
+            outputs (Tuple[torch.Tensor]): Output feature maps.
+              The number of feature map levels and channels correspond to
+               `num_outs` and `out_channels` respectively.
+              Example of shapes:
+                ([1, 64, 40, 100], [1, 64, 20, 50], [1, 64, 10, 25]).
+        """
+        if type(inputs) == tuple:  # 如果输入是 tuple 类型，将其转换为 list 类型
+            inputs = list(inputs)
 
-class DLA(nn.Module):
-    def __init__(
-        self,
-        levels,
-        channels,
-        num_classes=1000,
-        block=BasicBlock,
-        out_indices=(2, 3, 4, 5),
-        residual_root=False,
-        linear_root=False,
-    ):
-        super(DLA, self).__init__()
-        self.channels = channels
-        self.num_classes = num_classes
-        self.out_indices = out_indices
-        self.base_layer = nn.Sequential(
-            nn.Conv2d(3, channels[0], kernel_size=7, stride=1, padding=3, bias=False),
-            nn.BatchNorm2d(channels[0], momentum=BN_MOMENTUM),
-            nn.ReLU(inplace=True),
-        )
-        self.level0 = self._make_conv_level(channels[0], channels[0], levels[0])
-        self.level1 = self._make_conv_level(
-            channels[0], channels[1], levels[1], stride=2
-        )
-        self.level2 = Tree(
-            levels[2],
-            block,
-            channels[1],
-            channels[2],
-            2,
-            level_root=False,
-            root_residual=residual_root,
-        )
-        self.level3 = Tree(
-            levels[3],
-            block,
-            channels[2],
-            channels[3],
-            2,
-            level_root=True,
-            root_residual=residual_root,
-        )
-        self.level4 = Tree(
-            levels[4],
-            block,
-            channels[3],
-            channels[4],
-            2,
-            level_root=True,
-            root_residual=residual_root,
-        )
-        self.level5 = Tree(
-            levels[5],
-            block,
-            channels[4],
-            channels[5],
-            2,
-            level_root=True,
-            root_residual=residual_root,
-        )
+        assert len(inputs) >= len(self.in_channels)  # 确保输入的特征图数量不小于 in_channels 的长度
 
-        # for m in self.modules():
-        #     if isinstance(m, nn.Conv2d):
-        #         n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-        #         m.weight.data.normal_(0, math.sqrt(2. / n))
-        #     elif isinstance(m, nn.BatchNorm2d):
-        #         m.weight.data.fill_(1)
-        #         m.bias.data.zero_()
+        if len(inputs) > len(self.in_channels):  # 如果输入的特征图数量大于 in_channels 的长度
+            for _ in range(len(inputs) - len(self.in_channels)):  # 删除多余的输入特征图
+                del inputs[0]
 
-    def _make_level(self, block, inplanes, planes, blocks, stride=1):
-        downsample = None
-        if stride != 1 or inplanes != planes:
-            downsample = nn.Sequential(
-                nn.MaxPool2d(stride, stride=stride),
-                nn.Conv2d(inplanes, planes, kernel_size=1, stride=1, bias=False),
-                nn.BatchNorm2d(planes, momentum=BN_MOMENTUM),
+        # 构建 lateral 卷积层的输出
+        laterals = [
+            lateral_conv(inputs[i + self.start_level])  # 通过 lateral 卷积对每个输入特征图进行处理
+            for i, lateral_conv in enumerate(self.lateral_convs)
+        ]
+
+        # 构建自顶向下的路径
+        used_backbone_levels = len(laterals)  # 使用的骨干网络层数，即 lateral 卷积层的数量
+        for i in range(used_backbone_levels - 1, 0, -1):  # 从最后一层往前遍历
+            prev_shape = laterals[i - 1].shape[2:]  # 获取上一层的空间维度（不包括 batch 和通道）
+            laterals[i - 1] = laterals[i - 1]*self.weights_laterals[i]+self.weights_upsampled[i]*F.interpolate(  # 将当前层的特征图上采样到上一层的大小并进行融合
+                laterals[i], size=prev_shape, mode='nearest'  # 使用最近邻插值方法进行上采样
             )
 
-        layers = []
-        layers.append(block(inplanes, planes, stride, downsample=downsample))
-        for i in range(1, blocks):
-            layers.append(block(inplanes, planes))
+        # 对每一层的特征图进行 FPN 卷积处理
+        outs = [self.fpn_convs[i](laterals[i]) for i in range(used_backbone_levels)]
+        
+        # 返回每一层的输出特征图
+        return tuple(outs)
 
-        return nn.Sequential(*layers)
-
-    def _make_conv_level(self, inplanes, planes, convs, stride=1, dilation=1):
-        modules = []
-        for i in range(convs):
-            modules.extend(
-                [
-                    nn.Conv2d(
-                        inplanes,
-                        planes,
-                        kernel_size=3,
-                        stride=stride if i == 0 else 1,
-                        padding=dilation,
-                        bias=False,
-                        dilation=dilation,
-                    ),
-                    nn.BatchNorm2d(planes, momentum=BN_MOMENTUM),
-                    nn.ReLU(inplace=True),
-                ]
-            )
-            inplanes = planes
-        return nn.Sequential(*modules)
-
-    def forward(self, x):
-        y = []
-        x = self.base_layer(x)
-        for i in range(6):
-            x = getattr(self, 'level{}'.format(i))(x)
-            if i in self.out_indices:
-                y.append(x)
-        return y
-
-    def load_pretrained_model(self, data='imagenet', name='dla34', hash='ba72cf86'):
-        # fc = self.fc
-        if name.endswith('.pth'):
-            model_weights = torch.load(data + name)
-        else:
-            model_url = get_model_url(data, name, hash)
-            model_weights = model_zoo.load_url(model_url)
-        self.load_state_dict(model_weights, strict=False)
-        # self.fc = fc
-
-
-def dla34(pretrained=True, levels=None, in_channels=None, **kwargs):  # DLA-34
-    model = DLA(levels=levels, channels=in_channels, block=BasicBlock, **kwargs)
-    if pretrained:
-        model.load_pretrained_model(data='imagenet', name='dla34', hash='ba72cf86')
-    return model
-
-
-@BACKBONES.register_module
-class DLANet(nn.Module):
-    def __init__(
-        self,
-        dla='dla34',
-        pretrained=True,
-        levels=[1, 1, 1, 2, 2, 1],
-        in_channels=[16, 32, 64, 128, 256, 512],
-        cfg=None,
-    ):
-        super(DLANet, self).__init__()
-        self.cfg = cfg
-        self.in_channels = in_channels
-
-        self.model = eval(dla)(
-            pretrained=pretrained, levels=levels, in_channels=in_channels
-        )
-
-    def forward(self, x):
-        x = self.model(x)
-        return x
-
-
-class Identity(nn.Module):
-    def __init__(self):
-        super(Identity, self).__init__()
-
-    def forward(self, x):
-        return x
-
-
-def fill_fc_weights(layers):
-    for m in layers.modules():
-        if isinstance(m, nn.Conv2d):
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-
-
-def fill_up_weights(up):
-    w = up.weight.data
-    f = math.ceil(w.size(2) / 2)
-    c = (2 * f - 1 - f % 2) / (2.0 * f)
-    for i in range(w.size(2)):
-        for j in range(w.size(3)):
-            w[0, 0, i, j] = (1 - math.fabs(i / f - c)) * (1 - math.fabs(j / f - c))
-    for c in range(1, w.size(0)):
-        w[c, 0, :, :] = w[0, 0, :, :]

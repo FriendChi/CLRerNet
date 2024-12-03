@@ -83,8 +83,8 @@ class CLRerNetFPN(nn.Module):
 
             self.lateral_convs.append(l_conv)  # 将 lateral 卷积层添加到列表中
             self.fpn_convs.append(fpn_conv)  # 将 FPN 卷积层添加到列表中
-        for i in range(len(self.lateral_convs)-1):
             self.se_list.append(SE_Block(out_channels))
+            
     def forward(self, inputs):
         """
         Args:
@@ -120,10 +120,9 @@ class CLRerNetFPN(nn.Module):
             laterals[i - 1] += F.interpolate(  # 将当前层的特征图上采样到上一层的大小并进行融合
                 laterals[i], size=prev_shape, mode='nearest'  # 使用最近邻插值方法进行上采样
             )
-            laterals[i-1] = self.se_list[i](laterals[i-1])
 
         # 对每一层的特征图进行 FPN 卷积处理
-        outs = [self.fpn_convs[i](laterals[i]) for i in range(used_backbone_levels)]
+        outs = [self.se_list[i](laterals[i]) for i in range(used_backbone_levels)]
         
         # 返回每一层的输出特征图
         return tuple(outs)

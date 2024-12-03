@@ -11,7 +11,7 @@ from mmcv.cnn import ConvModule
 from mmdet.models.builder import NECKS
 
 class SE_Block(nn.Module):
-    def __init__(self, inchannel, ratio=16):
+    def __init__(self, inchannel,outchannel, ratio=16):
         super(SE_Block, self).__init__()
         # 全局平均池化(Fsq操作)
         self.gap = nn.AdaptiveAvgPool2d((1, 1))
@@ -19,7 +19,7 @@ class SE_Block(nn.Module):
         self.fc = nn.Sequential(
             nn.Linear(inchannel, inchannel // ratio, bias=False),  # 从 c -> c/r
             nn.ReLU(),
-            nn.Linear(inchannel // ratio, inchannel, bias=False),  # 从 c/r -> c
+            nn.Linear(inchannel // ratio, outchannel, bias=False),  # 从 c/r -> c
             nn.Sigmoid()
         )
  
@@ -84,7 +84,7 @@ class CLRerNetFPN(nn.Module):
             self.lateral_convs.append(l_conv)  # 将 lateral 卷积层添加到列表中
             self.fpn_convs.append(fpn_conv)  # 将 FPN 卷积层添加到列表中
         for i in range(len(self.lateral_convs)-1):
-            self.se_list.append(SE_Block(out_channels))
+            self.se_list.append(SE_Block(out_channels*2,out_channels))
     def forward(self, inputs):
         """
         Args:
@@ -117,11 +117,9 @@ class CLRerNetFPN(nn.Module):
         used_backbone_levels = len(laterals)  # 使用的骨干网络层数，即 lateral 卷积层的数量
         for i in range(used_backbone_levels - 1, 0, -1):  # 从最后一层往前遍历
             prev_shape = laterals[i - 1].shape[2:]  # 获取上一层的空间维度（不包括 batch 和通道）
-            laterals[i - 1] += F.interpolate(  # 将当前层的特征图上采样到上一层的大小并进行融合
-                laterals[i], size=prev_shape, mode='nearest'  # 使用最近邻插值方法进行上采样
-            )
+            laterals[i - 1] = torch.cat([laterals[i - 1], F.interpolate(laterals[i], size=prev_shape, mode='nearest'  )], dim=1)
             laterals[i-1] = self.se_list[i](laterals[i-1])
-
+            
         # 对每一层的特征图进行 FPN 卷积处理
         outs = [self.fpn_convs[i](laterals[i]) for i in range(used_backbone_levels)]
         

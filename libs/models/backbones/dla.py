@@ -31,30 +31,23 @@ def conv3x3(in_planes, out_planes, stride=1):
         in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False
     )
 
-'''-------------SE模块-----------------------------'''
-#全局平均池化+1*1卷积核+ReLu+1*1卷积核+Sigmoid
-class SE_Block(nn.Module):
-    def __init__(self, inchannel, ratio=16):
-        super(SE_Block, self).__init__()
-        # 全局平均池化(Fsq操作)
-        self.gap = nn.AdaptiveAvgPool2d((1, 1))
-        # 两个全连接层(Fex操作)
-        self.fc = nn.Sequential(
-            nn.Linear(inchannel, inchannel // ratio, bias=False),  # 从 c -> c/r
-            nn.ReLU(),
-            nn.Linear(inchannel // ratio, inchannel, bias=False),  # 从 c/r -> c
-            nn.Sigmoid()
-        )
- 
+
+class SE_Layer(nn.Module):
+    def __init__(self, channel, reduction=4):
+        super(SE_Layer, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.weight = nn.Parameter(nn.init.kaiming_normal_(
+                         torch.empty(_make_divisible(channel // reduction, 8), channel, 1, 1)
+                                  ))
+        self.act = h_sigmoid()
+
     def forward(self, x):
-            # 读取批数据图片数量及通道数
-            b, c, h, w = x.size()
-            # Fsq操作：经池化后输出b*c的矩阵
-            y = self.gap(x).view(b, c)
-            # Fex操作：经全连接层输出（b，c，1，1）矩阵
-            y = self.fc(y).view(b, c, 1, 1)
-            # Fscale操作：将得到的权重乘以原来的特征图x
-            return x * y.expand_as(x)
+        y = self.avg_pool(x)
+        y = F.conv2d(y,self.weight,stride=1,padding=0, bias=True)
+        y = F.relu(y, inplace=True)
+        y = F.conv2d(y,self.weight.permute(1,0,2,3),stride=1,padding=0, bias=True)
+        y = self.act(y)
+        return y*x
 
 class BasicBlock(nn.Module):
     def __init__(self, inplanes, planes, stride=1, dilation=1):
@@ -80,7 +73,7 @@ class BasicBlock(nn.Module):
             dilation=dilation,
         )
         self.bn2 = nn.BatchNorm2d(planes, momentum=BN_MOMENTUM)
-        self.SE = SE_Block(planes)
+        self.SE = SE_Layer(planes)
 
         self.stride = stride
 
@@ -94,8 +87,7 @@ class BasicBlock(nn.Module):
 
         out = self.conv2(out)
         out = self.bn2(out)
-        SE_out = self.SE(out)
-        out = out * SE_out
+        out = self.SE(out)
         out += residual
         out = self.relu(out)
 

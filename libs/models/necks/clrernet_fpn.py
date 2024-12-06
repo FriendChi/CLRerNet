@@ -144,7 +144,7 @@ class CLRerNetFPN(nn.Module):
         # 构建自顶向下的路径
         used_backbone_levels = len(laterals)  # 使用的骨干网络层数，即 lateral 卷积层的数量
         for i in range(used_backbone_levels - 1, 0, -1):  # 从最后一层往前遍历
-            # prev_shape = laterals[i - 1].shape[2:]  # 获取上一层的空间维度（不包括 batch 和通道）
+            prev_shape = laterals[i - 1].shape[2:]  # 获取上一层的空间维度（不包括 batch 和通道）
             laterals[i - 1] = self.galas[i-1](F.interpolate(  laterals[i], size=prev_shape, mode='nearest'  ), laterals[i - 1])
 
         # 对每一层的特征图进行 FPN 卷积处理

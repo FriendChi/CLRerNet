@@ -32,6 +32,59 @@ def conv3x3(in_planes, out_planes, stride=1):
     )
 
 
+def act_layer(act, inplace=False, neg_slope=0.2, n_prelu=1):
+    # activation layer
+    act = act.lower()
+    if act == 'relu':
+        layer = nn.ReLU(inplace)
+    elif act == 'relu6':
+        layer = nn.ReLU6(inplace)
+    elif act == 'leakyrelu':
+        layer = nn.LeakyReLU(neg_slope, inplace)
+    elif act == 'prelu':
+        layer = nn.PReLU(num_parameters=n_prelu, init=neg_slope)
+    elif act == 'gelu':
+        layer = nn.GELU()
+    elif act == 'hswish':
+        layer = nn.Hardswish(inplace)
+    else:
+        raise NotImplementedError('activation layer [%s] is not found' % act)
+    return layer
+
+class CAB(nn.Module):
+    def __init__(self, in_channels, out_channels=None, ratio=1, activation='relu'):
+        super(CAB, self).__init__()
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        if self.in_channels < ratio:
+            ratio = self.in_channels
+        self.reduced_channels = self.in_channels // ratio
+        if self.out_channels == None:
+            self.out_channels = in_channels
+
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.activation = act_layer(activation, inplace=True)
+        self.fc1 = nn.Conv2d(self.in_channels, self.reduced_channels, 1, bias=False)
+        self.fc2 = nn.Conv2d(self.reduced_channels, self.out_channels, 1, bias=False)
+        
+        self.sigmoid = nn.Sigmoid()
+
+        self.init_weights('normal')
+    
+
+    def forward(self, x):
+        residual = x
+        avg_pool_out = self.avg_pool(x) 
+        avg_out = self.fc2(self.activation(self.fc1(avg_pool_out)))
+
+        max_pool_out= self.max_pool(x) 
+        max_out = self.fc2(self.activation(self.fc1(max_pool_out)))
+
+        out = avg_out + max_out
+        return self.sigmoid(out) * residual
+
 class BasicBlock(nn.Module):
     def __init__(self, inplanes, planes, stride=1, dilation=1):
         super(BasicBlock, self).__init__()
@@ -55,6 +108,7 @@ class BasicBlock(nn.Module):
             bias=False,
             dilation=dilation,
         )
+        self.cab = CAB(planes)
         self.bn2 = nn.BatchNorm2d(planes, momentum=BN_MOMENTUM)
         self.stride = stride
 
@@ -68,6 +122,7 @@ class BasicBlock(nn.Module):
 
         out = self.conv2(out)
         out = self.bn2(out)
+        out = self.cab(out)
 
         out += residual
         out = self.relu(out)

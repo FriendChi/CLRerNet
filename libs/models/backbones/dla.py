@@ -34,7 +34,7 @@ def conv3x3(in_planes, out_planes, stride=1):
 '''-------------SE模块-----------------------------'''
 #全局平均池化+1*1卷积核+ReLu+1*1卷积核+Sigmoid
 class SE_Block(nn.Module):
-    def __init__(self, inchannel, ratio=16):
+    def __init__(self, inchannel, ratio=1):
         super(SE_Block, self).__init__()
         # 全局平均池化(Fsq操作)
         self.gap = nn.AdaptiveAvgPool2d((1, 1))

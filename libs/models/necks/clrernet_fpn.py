@@ -50,7 +50,6 @@ class LGAG(nn.Module):
         )
         self.activation = act_layer(activation, inplace=True)
 
-        self.init_weights('normal')
     
                 
     def forward(self, g, x):

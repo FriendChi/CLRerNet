@@ -6,7 +6,7 @@ https://github.com/Turoad/CLRNet/blob/main/clrnet/models/necks/fpn.py
 
 import torch.nn as nn
 import torch.nn.functional as F
-
+import torch
 from mmcv.cnn import ConvModule
 from mmdet.models.builder import NECKS
 
@@ -15,7 +15,7 @@ from mmdet.models.builder import NECKS
 class CLRerNetFPN(nn.Module):
     def __init__(self, in_channels, out_channels, num_outs):
         """
-        Feature pyramid network for CLRerNet.
+        Feature pyramid network with Fast Normalized Fusion for CLRerNet.
         Args:
             in_channels (List[int]): Channel number list.
             out_channels (int): Number of output feature map channels.
@@ -32,6 +32,10 @@ class CLRerNetFPN(nn.Module):
         self.start_level = 0
         self.lateral_convs = nn.ModuleList()
         self.fpn_convs = nn.ModuleList()
+
+        # Learnable weights for Fast Normalized Fusion
+        self.fusion_weights = nn.Parameter(torch.ones(2*(self.num_ins-1), requires_grad=True))
+        self.pre_weights = nn.Parameter(torch.ones(2*(self.num_ins)+1, requires_grad=True))
 
         for i in range(self.start_level, self.backbone_end_level):
             l_conv = ConvModule(
@@ -56,7 +60,20 @@ class CLRerNetFPN(nn.Module):
 
             self.lateral_convs.append(l_conv)
             self.fpn_convs.append(fpn_conv)
-
+        self.bi_convs = nn.ModuleList()
+        for i in range(len(self.lateral_convs)-1):
+            bi_conv = ConvModule(
+                out_channels,
+                out_channels,
+                3,
+                padding=1,
+                conv_cfg=None,
+                norm_cfg=None,
+                act_cfg=None,
+                inplace=False,
+            )
+            self.bi_convs.append(bi_conv)
+        self.max_pool = nn.MaxPool2d(kernel_size=3, stride=2)
     def forward(self, inputs):
         """
         Args:
@@ -65,15 +82,13 @@ class CLRerNetFPN(nn.Module):
                 ([1, 64, 80, 200], [1, 128, 40, 100], [1, 256, 20, 50], [1, 512, 10, 25]).
         Returns:
             outputs (Tuple[torch.Tensor]): Output feature maps.
-              The number of feature map levels and channels correspond to
-               `num_outs` and `out_channels` respectively.
               Example of shapes:
                 ([1, 64, 40, 100], [1, 64, 20, 50], [1, 64, 10, 25]).
         """
         if type(inputs) == tuple:
             inputs = list(inputs)
 
-        assert len(inputs) >= len(self.in_channels)  # 4 > 3
+        assert len(inputs) >= len(self.in_channels)
 
         if len(inputs) > len(self.in_channels):
             for _ in range(len(inputs) - len(self.in_channels)):
@@ -85,13 +100,51 @@ class CLRerNetFPN(nn.Module):
             for i, lateral_conv in enumerate(self.lateral_convs)
         ]
 
-        # build top-down path
+        # Normalize weights for Fast Normalized Fusion
+        pre_weights = F.relu(self.pre_weights)  # Ensure non-negative
+
+        # build top-down path with Fast Normalized Fusion
         used_backbone_levels = len(laterals)
+
+        middle_feature = laterals[1].clone()
+        
+        for i in range(used_backbone_levels - 1):
+            downsampled = self.max_pool(laterals[i])
+            division = pre_weights[i*2]+pre_weights[i*2+1]+1e-6
+
+            laterals[i+1] = (
+                pre_weights[i*2] /division* laterals[i+1]
+                + pre_weights[i*2+1] /division* downsampled
+            )
+            laterals[i+1] = self.fpn_convs[i](laterals[i+1])
+
+
+        # Normalize weights for Fast Normalized Fusion
+        fusion_weights = F.relu(self.fusion_weights)  # Ensure non-negative
+
+        
+        laterals[-1] = self.fpn_convs[-1](laterals[-1])
         for i in range(used_backbone_levels - 1, 0, -1):
             prev_shape = laterals[i - 1].shape[2:]
-            laterals[i - 1] += F.interpolate(
+            upsampled = F.interpolate(
                 laterals[i], size=prev_shape, mode='nearest'
             )
+            if i-1 == 1:
+                division = fusion_weights[(i - 1)*2]+fusion_weights[(i - 1)*2+1]+1e-6+pre_weights[-1]
+                # Apply normalized weights
+                laterals[i - 1] = (
+                    fusion_weights[(i - 1)*2] /division* laterals[i - 1]
+                    + fusion_weights[(i - 1)*2+1] /division* upsampled+pre_weights[-1] /division* middle_feature
+                )                
+            else:    
+                division = fusion_weights[(i - 1)*2]+fusion_weights[(i - 1)*2+1]+1e-6
+                # Apply normalized weights
+                laterals[i - 1] = (
+                    fusion_weights[(i - 1)*2] /division* laterals[i - 1]
+                    + fusion_weights[(i - 1)*2+1] /division* upsampled
+                )
+            laterals[i - 1] = self.fpn_convs[i - 1](laterals[i - 1])
 
-        outs = [self.fpn_convs[i](laterals[i]) for i in range(used_backbone_levels)]
-        return tuple(outs)
+        # Apply fpn_convs to each lateral
+        
+        return tuple(laterals)

@@ -15,7 +15,7 @@ import torch
 from torch import nn
 import torch.utils.model_zoo as model_zoo
 from mmdet.models.builder import BACKBONES
-from torch.nn import functional as F
+
 
 BN_MOMENTUM = 0.1
 logger = logging.getLogger(__name__)
@@ -30,6 +30,7 @@ def conv3x3(in_planes, out_planes, stride=1):
     return nn.Conv2d(
         in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False
     )
+
 
 import torch.nn as nn
 import torch
@@ -65,7 +66,7 @@ class NAMAttention(nn.Module):
         x_out1 = self.Channel_Att(x)
 
         return x_out1
-        
+
 class BasicBlock(nn.Module):
     def __init__(self, inplanes, planes, stride=1, dilation=1):
         super(BasicBlock, self).__init__()
@@ -89,7 +90,6 @@ class BasicBlock(nn.Module):
             bias=False,
             dilation=dilation,
         )
-        self.nam = NAMAttention(planes)
         self.bn2 = nn.BatchNorm2d(planes, momentum=BN_MOMENTUM)
         self.stride = stride
 
@@ -103,7 +103,7 @@ class BasicBlock(nn.Module):
 
         out = self.conv2(out)
         out = self.bn2(out)
-        out = self.nam(out)
+
         out += residual
         out = self.relu(out)
 
@@ -216,6 +216,7 @@ class Root(nn.Module):
             padding=(kernel_size - 1) // 2,
         )
         self.bn = nn.BatchNorm2d(out_channels, momentum=BN_MOMENTUM)
+        self.nam = NAMAttention(out_channels)
         self.relu = nn.ReLU(inplace=True)
         self.residual = residual
 
@@ -223,6 +224,7 @@ class Root(nn.Module):
         children = x
         x = self.conv(torch.cat(x, 1))
         x = self.bn(x)
+        x = self.nam(x)
         if self.residual:
             x += children[0]
         x = self.relu(x)

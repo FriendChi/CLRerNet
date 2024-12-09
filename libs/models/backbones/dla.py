@@ -42,12 +42,20 @@ class Channel_Att(nn.Module):
         self.channels = channels
 
         self.bn2 = nn.BatchNorm2d(self.channels, affine=True)
-
+        # Fully Connected layer to replace 1D Conv
+        self.fc = nn.Linear(self.channels, self.channels, bias=False)
     def forward(self, x):
         residual = x
 
         x = self.bn2(x)
-        weight_bn = self.bn2.weight.data.abs() / torch.sum(self.bn2.weight.data.abs())
+        # 计算BatchNorm权重的绝对值
+        weight_bn = self.bn2.weight.abs().unsqueeze(0)  # [1, channels]
+
+        # 用全连接层处理权重
+        weight_fc = self.fc(weight_bn)  # [1, channels]
+
+        # 归一化权重
+        weight_fc = weight_fc / torch.sum(weight_fc, dim=1, keepdim=True)
         x = x.permute(0, 2, 3, 1).contiguous()
         x = torch.mul(weight_bn, x)
         x = x.permute(0, 3, 1, 2).contiguous()

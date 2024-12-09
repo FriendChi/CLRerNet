@@ -31,6 +31,11 @@ def conv3x3(in_planes, out_planes, stride=1):
         in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False
     )
 
+
+import torch.nn as nn
+import torch
+from torch.nn import functional as F
+
 class eca_layer(nn.Module):
     """Constructs a ECA module.
 
@@ -79,7 +84,6 @@ class BasicBlock(nn.Module):
             bias=False,
             dilation=dilation,
         )
-        self.eca = eca_layer(planes, 3)
         self.bn2 = nn.BatchNorm2d(planes, momentum=BN_MOMENTUM)
         self.stride = stride
 
@@ -93,7 +97,7 @@ class BasicBlock(nn.Module):
 
         out = self.conv2(out)
         out = self.bn2(out)
-        out = self.eca(out)
+
         out += residual
         out = self.relu(out)
 
@@ -206,6 +210,7 @@ class Root(nn.Module):
             padding=(kernel_size - 1) // 2,
         )
         self.bn = nn.BatchNorm2d(out_channels, momentum=BN_MOMENTUM)
+        self.eca = eca_layer(out_channels)
         self.relu = nn.ReLU(inplace=True)
         self.residual = residual
 
@@ -213,6 +218,7 @@ class Root(nn.Module):
         children = x
         x = self.conv(torch.cat(x, 1))
         x = self.bn(x)
+        x = self.eca(x)
         if self.residual:
             x += children[0]
         x = self.relu(x)

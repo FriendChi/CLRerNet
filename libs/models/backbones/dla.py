@@ -42,12 +42,19 @@ class Channel_Att(nn.Module):
         self.channels = channels
 
         self.bn2 = nn.BatchNorm2d(self.channels, affine=True)
+        self.conv1d = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False)
+
 
     def forward(self, x):
         residual = x
 
         x = self.bn2(x)
-        weight_bn = self.bn2.weight.data.abs() / torch.sum(self.bn2.weight.data.abs())
+        # 获取BatchNorm权重并通过1D卷积
+        weight_bn = self.bn2.weight.data.abs().unsqueeze(0).unsqueeze(0)  # [1, 1, channels]
+        weight_bn = self.conv1d(weight_bn).squeeze(0).squeeze(0)  # [channels]
+
+        # 对卷积后的权重归一化
+        weight_bn = weight_bn / torch.sum(weight_bn)
         x = x.permute(0, 2, 3, 1).contiguous()
         x = torch.mul(weight_bn, x)
         x = x.permute(0, 3, 1, 2).contiguous()

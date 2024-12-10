@@ -10,12 +10,60 @@ import torch
 from mmcv.cnn import ConvModule
 from mmdet.models.builder import NECKS
 
+class SFM(nn.Module):
+    def __init__(self, in_channels):
+        """
+        原版 SFM 模块，增加特征尺寸对齐功能。
+        Args:
+            in_channels: 输入特征图的通道数（假设每层输入的通道数相同）。
+        """
+        super(SFM, self).__init__()
+        # 通道加权系数生成
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)  # 全局平均池化
+        self.fc = nn.Conv2d(in_channels, 1, kernel_size=1, bias=False)  # 通道降维并生成权重
+        self.sigmoid = nn.Sigmoid()  # 激活函数，确保权重范围为 [0, 1]
+
+    def forward(self, *features):
+        """
+        Args:
+            *features: 可变数量的输入特征图（来自不同层）。
+        Returns:
+            融合后的特征图。
+        """
+        # 获取基准特征的尺寸（以第一个特征为基准）
+        base_size = features[0].shape[2:]  # (H, W)
+        
+        aligned_features = []  # 存储对齐后的特征
+        for feature in features:
+            current_size = feature.shape[2:]  # 当前特征的尺寸
+            if current_size < base_size:  # 如果尺寸小于基准尺寸
+                # 上采样到基准尺寸
+                feature = F.interpolate(feature, size=base_size, mode='nearest')
+            elif current_size > base_size:  # 如果尺寸大于基准尺寸
+                # 下采样到基准尺寸
+                feature = F.adaptive_max_pool2d(feature, output_size=base_size)
+            aligned_features.append(feature)
+        
+        # 初始化融合特征
+        fused_feature = 0
+        for feature in aligned_features:
+            # 计算通道权重
+            attention = self.avg_pool(feature)  # 全局池化 (B, C, 1, 1)
+            attention = self.sigmoid(self.fc(attention))  # (B, 1, 1, 1)
+            
+            # 权重加权后相加
+            fused_feature += feature * attention
+        
+        return fused_feature
+ 
+
+
 
 @NECKS.register_module
 class CLRerNetFPN(nn.Module):
     def __init__(self, in_channels, out_channels, num_outs):
         """
-        Feature pyramid network with Fast Normalized Fusion for CLRerNet.
+        Feature pyramid network for CLRerNet.
         Args:
             in_channels (List[int]): Channel number list.
             out_channels (int): Number of output feature map channels.
@@ -31,11 +79,11 @@ class CLRerNetFPN(nn.Module):
         self.backbone_end_level = self.num_ins
         self.start_level = 0
         self.lateral_convs = nn.ModuleList()
-        self.fpn_convs = nn.ModuleList()
+        # self.fpn_convs = nn.ModuleList()
 
-        # Learnable weights for Fast Normalized Fusion
-        self.fusion_weights = nn.Parameter(torch.ones(2*(self.num_ins-1), requires_grad=True))
-        self.pre_weights = nn.Parameter(torch.ones(2*(self.num_ins)+1, requires_grad=True))
+        self.sfm1 = SFM(out_channels)
+        self.sfm2 = SFM(out_channels)
+        self.sfm3 = SFM(out_channels)
 
         for i in range(self.start_level, self.backbone_end_level):
             l_conv = ConvModule(
@@ -47,33 +95,20 @@ class CLRerNetFPN(nn.Module):
                 act_cfg=None,
                 inplace=False,
             )
-            fpn_conv = ConvModule(
-                out_channels,
-                out_channels,
-                3,
-                padding=1,
-                conv_cfg=None,
-                norm_cfg=None,
-                act_cfg=None,
-                inplace=False,
-            )
+            # fpn_conv = ConvModule(
+            #     out_channels,
+            #     out_channels,
+            #     3,
+            #     padding=1,
+            #     conv_cfg=None,
+            #     norm_cfg=None,
+            #     act_cfg=None,
+            #     inplace=False,
+            # )
 
             self.lateral_convs.append(l_conv)
-            self.fpn_convs.append(fpn_conv)
-        self.bi_convs = nn.ModuleList()
-        for i in range(len(self.lateral_convs)-1):
-            bi_conv = ConvModule(
-                out_channels,
-                out_channels,
-                3,
-                padding=1,
-                conv_cfg=None,
-                norm_cfg=None,
-                act_cfg=None,
-                inplace=False,
-            )
-            self.bi_convs.append(bi_conv)
-        self.max_pool = nn.MaxPool2d(kernel_size=3, stride=2)
+            # self.fpn_convs.append(fpn_conv)
+
     def forward(self, inputs):
         """
         Args:
@@ -82,13 +117,15 @@ class CLRerNetFPN(nn.Module):
                 ([1, 64, 80, 200], [1, 128, 40, 100], [1, 256, 20, 50], [1, 512, 10, 25]).
         Returns:
             outputs (Tuple[torch.Tensor]): Output feature maps.
+              The number of feature map levels and channels correspond to
+               `num_outs` and `out_channels` respectively.
               Example of shapes:
                 ([1, 64, 40, 100], [1, 64, 20, 50], [1, 64, 10, 25]).
         """
         if type(inputs) == tuple:
             inputs = list(inputs)
 
-        assert len(inputs) >= len(self.in_channels)
+        assert len(inputs) >= len(self.in_channels)  # 4 > 3
 
         if len(inputs) > len(self.in_channels):
             for _ in range(len(inputs) - len(self.in_channels)):
@@ -99,52 +136,19 @@ class CLRerNetFPN(nn.Module):
             lateral_conv(inputs[i + self.start_level])
             for i, lateral_conv in enumerate(self.lateral_convs)
         ]
+        outs = [l.clone() for l in laterals]
 
-        # Normalize weights for Fast Normalized Fusion
-        pre_weights = F.relu(self.pre_weights)  # Ensure non-negative
+        outs[1] = self.sfm1(laterals[1], laterals[0],laterals[2])
+        outs[2] = self.sfm2(laterals[2], outs[1])
+        outs[0] = self.sfm3(laterals[0], outs[1])
 
-        # build top-down path with Fast Normalized Fusion
-        used_backbone_levels = len(laterals)
+        # build top-down path
+        # used_backbone_levels = len(laterals)
+        # for i in range(used_backbone_levels - 1, 0, -1):
+        #     prev_shape = laterals[i - 1].shape[2:]
+        #     laterals[i - 1] += F.interpolate(
+        #         laterals[i], size=prev_shape, mode='nearest'
+        #     )
 
-        middle_feature = laterals[1].clone()
-        
-        for i in range(used_backbone_levels - 1):
-            downsampled = self.max_pool(laterals[i])
-            division = pre_weights[i*2]+pre_weights[i*2+1]+1e-6
-
-            laterals[i+1] = (
-                pre_weights[i*2] /division* laterals[i+1]
-                + pre_weights[i*2+1] /division* downsampled
-            )
-            laterals[i+1] = self.fpn_convs[i](laterals[i+1])
-
-
-        # Normalize weights for Fast Normalized Fusion
-        fusion_weights = F.relu(self.fusion_weights)  # Ensure non-negative
-
-        
-        laterals[-1] = self.fpn_convs[-1](laterals[-1])
-        for i in range(used_backbone_levels - 1, 0, -1):
-            prev_shape = laterals[i - 1].shape[2:]
-            upsampled = F.interpolate(
-                laterals[i], size=prev_shape, mode='nearest'
-            )
-            if i-1 == 1:
-                division = fusion_weights[(i - 1)*2]+fusion_weights[(i - 1)*2+1]+1e-6+pre_weights[-1]
-                # Apply normalized weights
-                laterals[i - 1] = (
-                    fusion_weights[(i - 1)*2] /division* laterals[i - 1]
-                    + fusion_weights[(i - 1)*2+1] /division* upsampled+pre_weights[-1] /division* middle_feature
-                )                
-            else:    
-                division = fusion_weights[(i - 1)*2]+fusion_weights[(i - 1)*2+1]+1e-6
-                # Apply normalized weights
-                laterals[i - 1] = (
-                    fusion_weights[(i - 1)*2] /division* laterals[i - 1]
-                    + fusion_weights[(i - 1)*2+1] /division* upsampled
-                )
-            laterals[i - 1] = self.fpn_convs[i - 1](laterals[i - 1])
-
-        # Apply fpn_convs to each lateral
-        
-        return tuple(laterals)
+        # outs = [self.fpn_convs[i](laterals[i]) for i in range(used_backbone_levels)]
+        return tuple(outs)

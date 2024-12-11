@@ -96,13 +96,13 @@ class CombinedAttention(nn.Module):
 
     def forward(self, x):
         # Sequential Combination
-        out = self.nam(x)  # Apply ECA
-        out = self.eca(out)  # Apply NAM
+        # out = self.nam(x)  # Apply ECA
+        # out = self.eca(out)  # Apply NAM
 
         # Uncomment below for parallel combination
-        # eca_out = self.eca(x)
-        # nam_out = self.nam(x)
-        # out = eca_out + nam_out
+        eca_out = self.eca(x)
+        nam_out = self.nam(x)
+        out = eca_out + nam_out
 
         return out
 

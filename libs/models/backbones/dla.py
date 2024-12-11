@@ -31,59 +31,80 @@ def conv3x3(in_planes, out_planes, stride=1):
         in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False
     )
 
+class Channel_Att(nn.Module):
+    def __init__(self, channels):
+        super(Channel_Att, self).__init__()
+        self.channels = channels
 
-def act_layer(act, inplace=False, neg_slope=0.2, n_prelu=1):
-    # activation layer
-    act = act.lower()
-    if act == 'relu':
-        layer = nn.ReLU(inplace)
-    elif act == 'relu6':
-        layer = nn.ReLU6(inplace)
-    elif act == 'leakyrelu':
-        layer = nn.LeakyReLU(neg_slope, inplace)
-    elif act == 'prelu':
-        layer = nn.PReLU(num_parameters=n_prelu, init=neg_slope)
-    elif act == 'gelu':
-        layer = nn.GELU()
-    elif act == 'hswish':
-        layer = nn.Hardswish(inplace)
-    else:
-        raise NotImplementedError('activation layer [%s] is not found' % act)
-    return layer
-
-class CAB(nn.Module):
-    def __init__(self, in_channels, out_channels=None, ratio=1, activation='relu'):
-        super(CAB, self).__init__()
-
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        if self.in_channels < ratio:
-            ratio = self.in_channels
-        self.reduced_channels = self.in_channels // ratio
-        if self.out_channels == None:
-            self.out_channels = in_channels
-
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-        self.activation = act_layer(activation, inplace=True)
-        self.fc1 = nn.Conv2d(self.in_channels, self.reduced_channels, 1, bias=False)
-        self.fc2 = nn.Conv2d(self.reduced_channels, self.out_channels, 1, bias=False)
-        
-        self.sigmoid = nn.Sigmoid()
-
-        self.init_weights('normal')
-    
+        self.bn2 = nn.BatchNorm2d(self.channels, affine=True)
 
     def forward(self, x):
         residual = x
-        avg_pool_out = self.avg_pool(x) 
-        avg_out = self.fc2(self.activation(self.fc1(avg_pool_out)))
 
-        max_pool_out= self.max_pool(x) 
-        max_out = self.fc2(self.activation(self.fc1(max_pool_out)))
+        x = self.bn2(x)
+        weight_bn = self.bn2.weight.data.abs() / torch.sum(self.bn2.weight.data.abs())
+        x = x.permute(0, 2, 3, 1).contiguous()
+        x = torch.mul(weight_bn, x)
+        x = x.permute(0, 3, 1, 2).contiguous()
 
-        out = avg_out + max_out
-        return self.sigmoid(out) * residual
+        x = torch.sigmoid(x) * residual  #
+
+        return x
+
+
+class NAMAttention(nn.Module):
+    def __init__(self, channels):
+        super(NAMAttention, self).__init__()
+        self.Channel_Att = Channel_Att(channels)
+
+    def forward(self, x):
+        x_out1 = self.Channel_Att(x)
+
+        return x_out1
+
+class eca_layer(nn.Module):
+    """Constructs a ECA module.
+
+    Args:
+        channel: Number of channels of the input feature map
+        k_size: Adaptive selection of kernel size
+    """
+    def __init__(self, channel, k_size=3):
+        super(eca_layer, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.conv = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False) 
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # feature descriptor on the global spatial information
+        y = self.avg_pool(x)
+
+        # Two different branches of ECA module
+        y = self.conv(y.squeeze(-1).transpose(-1, -2)).transpose(-1, -2).unsqueeze(-1)
+
+        # Multi-scale information fusion
+        y = self.sigmoid(y)
+
+        return x * y.expand_as(x)
+
+class CombinedAttention(nn.Module):
+    """Combine ECA and NAM in a sequential or parallel manner"""
+    def __init__(self, channel):
+        super(CombinedAttention, self).__init__()
+        self.eca = eca_layer(channel)
+        self.nam = NAMAttention(channel)
+
+    def forward(self, x):
+        # Sequential Combination
+        out = self.nam(x)  # Apply ECA
+        out = self.eca(out)  # Apply NAM
+
+        # Uncomment below for parallel combination
+        # eca_out = self.eca(x)
+        # nam_out = self.nam(x)
+        # out = eca_out + nam_out
+
+        return out
 
 class BasicBlock(nn.Module):
     def __init__(self, inplanes, planes, stride=1, dilation=1):
@@ -108,7 +129,7 @@ class BasicBlock(nn.Module):
             bias=False,
             dilation=dilation,
         )
-        self.cab = CAB(planes)
+        self.comA =CombinedAttention(planes)
         self.bn2 = nn.BatchNorm2d(planes, momentum=BN_MOMENTUM)
         self.stride = stride
 
@@ -122,7 +143,8 @@ class BasicBlock(nn.Module):
 
         out = self.conv2(out)
         out = self.bn2(out)
-        out = self.cab(out)
+
+        out = self.comA(out)
 
         out += residual
         out = self.relu(out)
@@ -243,6 +265,7 @@ class Root(nn.Module):
         children = x
         x = self.conv(torch.cat(x, 1))
         x = self.bn(x)
+        
         if self.residual:
             x += children[0]
         x = self.relu(x)

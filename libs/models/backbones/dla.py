@@ -88,23 +88,34 @@ class eca_layer(nn.Module):
         return x * y.expand_as(x)
 
 class CombinedAttention(nn.Module):
-    """Combine ECA and NAM in a sequential or parallel manner"""
-    def __init__(self, channel):
+    def __init__(self, channels,fusion_type="concat"):
         super(CombinedAttention, self).__init__()
-        self.eca = eca_layer(channel)
-        self.nam = NAMAttention(channel)
+        self.nam = NAMAttention(channels)
+        self.eca = eca_layer(channels, k_size)
+        self.fusion_type = fusion_type
+        if fusion_type == "concat":
+            self.channel_reducer = nn.Conv2d(channels * 2, channels, kernel_size=1, stride=1, padding=0, bias=False)
+        if fusion_type == "weighted_sum":
+            self.fusion_weights = nn.Parameter(torch.tensor([0.5, 0.5]))
 
     def forward(self, x):
-        # Sequential Combination
-        out = self.nam(x)  # Apply ECA
-        out = self.eca(out)  # Apply NAM
+        # NAM Attention output
+        nam_out = self.nam(x)
 
-        # Uncomment below for parallel combination
-        # eca_out = self.eca(x)
-        # nam_out = self.nam(x)
-        # out = eca_out + nam_out
+        # ECA output
+        eca_out = self.eca(x)
+
+        # Fusion
+        if self.fusion_type == "concat":
+            out = torch.cat([nam_out, eca_out], dim=1)  # Double the channel size
+        elif self.fusion_type == "weighted_sum":
+            w1, w2 = torch.softmax(self.fusion_weights, dim=0)
+            out = w1 * nam_out + w2 * eca_out
+        else:
+            raise ValueError("Unsupported fusion_type. Choose from ['add', 'concat', 'weighted_sum'].")
 
         return out
+
 
 class BasicBlock(nn.Module):
     def __init__(self, inplanes, planes, stride=1, dilation=1):

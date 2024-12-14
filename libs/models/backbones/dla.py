@@ -105,7 +105,8 @@ class MultiScaleECALayer(nn.Module):
         ])
         
         self.sigmoid = nn.Sigmoid()
-        self.weights = torch.nn.Parameter(torch.ones(len(scales)))  # Learnable weights for each scale
+        self.conv_1x1 = nn.Conv2d(len(scales) * channel, channel, kernel_size=1, bias=False)
+
     def forward(self, x):
         # Global average pooling to get channel-wise feature descriptors
         y = self.avg_pool(x)  # Shape: [B, C, 1, 1]
@@ -116,12 +117,13 @@ class MultiScaleECALayer(nn.Module):
             scale_output = conv(y.squeeze(-1).transpose(-1, -2)).transpose(-1, -2).unsqueeze(-1)
             scale_outputs.append(scale_output)
         
-        # Fuse the multi-scale outputs (can experiment with sum, max, or concat)
-        
-        weighted_output = sum(weight * scale_output for weight, scale_output in zip(self.weights, scale_outputs))
+        # Concatenate multi-scale outputs and apply 1x1 convolution
+        concatenated_output = torch.cat(scale_outputs, dim=1)  # Concatenate along channels
+        fused_output = self.conv_1x1(concatenated_output)  # Apply 1x1 convolution to reduce channels
+
         
         # Normalize with sigmoid and apply to input feature map
-        attention = self.sigmoid(weighted_output)
+        attention = self.sigmoid(fused_output)
         return x * attention.expand_as(x)
 
 

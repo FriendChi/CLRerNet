@@ -87,34 +87,42 @@ class eca_layer(nn.Module):
 
         return x * y.expand_as(x)
 
-class CombinedAttention(nn.Module):
-    def __init__(self, channels,fusion_type="concat"):
-        super(CombinedAttention, self).__init__()
-        self.nam = NAMAttention(channels)
-        self.eca = eca_layer(channels, k_size)
-        self.fusion_type = fusion_type
-        if fusion_type == "concat":
-            self.channel_reducer = nn.Conv2d(channels * 2, channels, kernel_size=1, stride=1, padding=0, bias=False)
-        if fusion_type == "weighted_sum":
-            self.fusion_weights = nn.Parameter(torch.tensor([0.5, 0.5]))
-
+class MultiScaleECALayer(nn.Module):
+    """Constructs a Multi-Scale ECA module.
+    
+    Args:
+        channel: Number of channels of the input feature map
+        scales: List of kernel sizes for multi-scale convolution
+    """
+    def __init__(self, channel, scales=[3, 5, 7]):
+        super(MultiScaleECALayer, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        
+        # Create multiple convolutions for different scales (kernel sizes)
+        self.convs = nn.ModuleList([
+            nn.Conv1d(1, 1, kernel_size=scale, padding=(scale - 1) // 2, bias=False)
+            for scale in scales
+        ])
+        
+        self.sigmoid = nn.Sigmoid()
+        self.weights = torch.nn.Parameter(torch.ones(len(scales)))  # Learnable weights for each scale
     def forward(self, x):
-        # NAM Attention output
-        nam_out = self.nam(x)
-
-        # ECA output
-        eca_out = self.eca(x)
-
-        # Fusion
-        if self.fusion_type == "concat":
-            out = torch.cat([nam_out, eca_out], dim=1)  # Double the channel size
-        elif self.fusion_type == "weighted_sum":
-            w1, w2 = torch.softmax(self.fusion_weights, dim=0)
-            out = w1 * nam_out + w2 * eca_out
-        else:
-            raise ValueError("Unsupported fusion_type. Choose from ['add', 'concat', 'weighted_sum'].")
-
-        return out
+        # Global average pooling to get channel-wise feature descriptors
+        y = self.avg_pool(x)  # Shape: [B, C, 1, 1]
+        
+        # Apply different convolutions to capture multi-scale features
+        scale_outputs = []
+        for conv in self.convs:
+            scale_output = conv(y.squeeze(-1).transpose(-1, -2)).transpose(-1, -2).unsqueeze(-1)
+            scale_outputs.append(scale_output)
+        
+        # Fuse the multi-scale outputs (can experiment with sum, max, or concat)
+        
+        weighted_output = sum(weight * scale_output for weight, scale_output in zip(self.weights, scale_outputs))
+        
+        # Normalize with sigmoid and apply to input feature map
+        attention = self.sigmoid(weighted_output)
+        return x * attention.expand_as(x)
 
 
 class BasicBlock(nn.Module):
@@ -140,7 +148,7 @@ class BasicBlock(nn.Module):
             bias=False,
             dilation=dilation,
         )
-        self.comA =CombinedAttention(planes)
+        self.eca  = MultiScaleECALayer(planes)
         self.bn2 = nn.BatchNorm2d(planes, momentum=BN_MOMENTUM)
         self.stride = stride
 
@@ -154,8 +162,7 @@ class BasicBlock(nn.Module):
 
         out = self.conv2(out)
         out = self.bn2(out)
-
-        out = self.comA(out)
+        out = self.eca(out)
 
         out += residual
         out = self.relu(out)

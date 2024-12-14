@@ -106,9 +106,9 @@ class LaneIoULoss(CLRNetIoULoss):
 
         return pred_width, target_width
 
-    def distance_loss_weight(pred,weight_type="linear",alpha=1):
+    def distance_loss_weight(self,pred,weight_type="linear",alpha=1):
         # 生成权重（基于采样点的索引）
-        N, Nr = pred.shape
+        Nr = pred.shape[1]
         weights = torch.arange(Nr, device=pred.device).float()  # 采样点索引
         
         # 根据不同类型计算权重
@@ -143,6 +143,5 @@ class LaneIoULoss(CLRNetIoULoss):
         ), "prediction and target must have the same shape!"  # 确保预测和目标形状一致
         pred_width, target_width = self._calc_lane_width(pred, target)  # 动态计算宽度
         iou = self.calc_iou(pred, target, pred_width, target_width)  # 计算 IoU 值
-        distance_loss_weight = self.distance_loss_weight(pred,weight_type="linear")
-        return (1 - iou).mean() * self.loss_weight*distance_loss_weight  # 返回 IoU 损失
-
+        distance_loss_w = self.distance_loss_weight(pred)
+        return (1 - iou).mean() * self.loss_weight*distance_loss_w  # 返回 IoU 损失

@@ -87,15 +87,11 @@ class eca_layer(nn.Module):
 
         return x * y.expand_as(x)
 
-class MultiScaleECALayer(nn.Module):
-    """Constructs a Multi-Scale ECA module.
+class MaxValueFusionECA(nn.Module):
+    """Combine Max Value Fusion in Multi-Scale ECA without weighting."""
     
-    Args:
-        channel: Number of channels of the input feature map
-        scales: List of kernel sizes for multi-scale convolution
-    """
     def __init__(self, channel, scales=[3, 5, 7]):
-        super(MultiScaleECALayer, self).__init__()
+        super(MaxValueFusionECA, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         
         # Create multiple convolutions for different scales (kernel sizes)
@@ -105,7 +101,6 @@ class MultiScaleECALayer(nn.Module):
         ])
         
         self.sigmoid = nn.Sigmoid()
-        self.conv_1x1 = nn.Conv2d(len(scales) * channel, channel, kernel_size=1, bias=False)
 
     def forward(self, x):
         # Global average pooling to get channel-wise feature descriptors
@@ -117,15 +112,18 @@ class MultiScaleECALayer(nn.Module):
             scale_output = conv(y.squeeze(-1).transpose(-1, -2)).transpose(-1, -2).unsqueeze(-1)
             scale_outputs.append(scale_output)
         
-        # Concatenate multi-scale outputs and apply 1x1 convolution
-        concatenated_output = torch.cat(scale_outputs, dim=1)  # Concatenate along channels
-        fused_output = self.conv_1x1(concatenated_output)  # Apply 1x1 convolution to reduce channels
+        # Concatenate outputs from different scales
+        concatenated_output = torch.cat(scale_outputs, dim=1)  # Shape: [B, n*C, 1, 1]
 
+        # Reshape to [B, C, n, 1, 1] so we can take the max for each channel across different scales
+        reshaped_output = concatenated_output.view(concatenated_output.size(0), -1, len(self.convs), 1, 1)  # [B, C, n, 1, 1]
         
-        # Normalize with sigmoid and apply to input feature map
-        attention = self.sigmoid(fused_output)
-        return x * attention.expand_as(x)
+        # Now for each channel, select the maximum value across the n scales
+        max_value_fusion, _ = torch.max(reshaped_output, dim=2, keepdim=True)  # Shape: [B, C, 1, 1]
 
+        # Apply sigmoid and return the final output
+        attention = self.sigmoid(max_value_fusion)  # Shape: [B, C, 1, 1]
+        return x * attention.expand_as(x)  # Apply attention to the original input
 
 class BasicBlock(nn.Module):
     def __init__(self, inplanes, planes, stride=1, dilation=1):
@@ -150,7 +148,7 @@ class BasicBlock(nn.Module):
             bias=False,
             dilation=dilation,
         )
-        self.eca  = MultiScaleECALayer(planes)
+        self.eca = MaxValueFusionECA(planes)
         self.bn2 = nn.BatchNorm2d(planes, momentum=BN_MOMENTUM)
         self.stride = stride
 
@@ -164,6 +162,7 @@ class BasicBlock(nn.Module):
 
         out = self.conv2(out)
         out = self.bn2(out)
+
         out = self.eca(out)
 
         out += residual

@@ -31,38 +31,31 @@ def conv3x3(in_planes, out_planes, stride=1):
         in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False
     )
 
-
-import torch.nn as nn
-import torch
-from torch.nn import functional as F
-
 class Channel_Att(nn.Module):
     def __init__(self, channels):
         super(Channel_Att, self).__init__()
         self.channels = channels
-
-        self.bn2 = nn.BatchNorm2d(self.channels, affine=True)
-        self.conv1d = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False)
-
+        
+        # LayerNorm 对于每个通道进行归一化
+        self.layer_norm = nn.LayerNorm([channels, 1, 1])  # 归一化时不需要批次维度，适用于每个通道
 
     def forward(self, x):
         residual = x
+        
+        # 对每个样本的每个通道进行归一化
+        x = self.layer_norm(x)  # Shape: [B, C, H, W]
+        
+        # 根据 LayerNorm 权重进行加权
+        weight_ln = self.layer_norm.weight.data.abs() / torch.sum(self.layer_norm.weight.data.abs())
+        
+        # 对每个通道进行加权
+        x = x.permute(0, 2, 3, 1).contiguous()  # 转换为 [B, H, W, C]
+        x = torch.mul(weight_ln, x)  # 按照权重加权
+        x = x.permute(0, 3, 1, 2).contiguous()  # 恢复为 [B, C, H, W]
 
-        x = self.bn2(x)
-        # 获取BatchNorm权重并通过1D卷积
-        weight_bn = self.bn2.weight.data.abs().unsqueeze(0).unsqueeze(0)  # [1, 1, channels]
-        weight_bn = self.conv1d(weight_bn).squeeze(0).squeeze(0)  # [channels]
-
-        # 对卷积后的权重归一化
-        weight_bn = weight_bn / torch.sum(weight_bn)
-        x = x.permute(0, 2, 3, 1).contiguous()
-        x = torch.mul(weight_bn, x)
-        x = x.permute(0, 3, 1, 2).contiguous()
-
-        x = torch.sigmoid(x) * residual  #
+        x = torch.sigmoid(x) * residual  # 使用 sigmoid 激活进行调整
 
         return x
-
 
 class NAMAttention(nn.Module):
     def __init__(self, channels):
@@ -70,9 +63,34 @@ class NAMAttention(nn.Module):
         self.Channel_Att = Channel_Att(channels)
 
     def forward(self, x):
+        # 调用 Channel_Att 计算注意力
         x_out1 = self.Channel_Att(x)
-
         return x_out1
+
+class eca_layer(nn.Module):
+    """Constructs a ECA module.
+
+    Args:
+        channel: Number of channels of the input feature map
+        k_size: Adaptive selection of kernel size
+    """
+    def __init__(self, channel, k_size=3):
+        super(eca_layer, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.conv = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False) 
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # feature descriptor on the global spatial information
+        y = self.avg_pool(x)
+
+        # Two different branches of ECA module
+        y = self.conv(y.squeeze(-1).transpose(-1, -2)).transpose(-1, -2).unsqueeze(-1)
+
+        # Multi-scale information fusion
+        y = self.sigmoid(y)
+
+        return x * y.expand_as(x)
 
 class BasicBlock(nn.Module):
     def __init__(self, inplanes, planes, stride=1, dilation=1):
@@ -97,6 +115,7 @@ class BasicBlock(nn.Module):
             bias=False,
             dilation=dilation,
         )
+        self.nam = NAMAttention(planes)
         self.bn2 = nn.BatchNorm2d(planes, momentum=BN_MOMENTUM)
         self.stride = stride
 
@@ -110,6 +129,8 @@ class BasicBlock(nn.Module):
 
         out = self.conv2(out)
         out = self.bn2(out)
+
+        out = self.nam(out)
 
         out += residual
         out = self.relu(out)
@@ -223,7 +244,6 @@ class Root(nn.Module):
             padding=(kernel_size - 1) // 2,
         )
         self.bn = nn.BatchNorm2d(out_channels, momentum=BN_MOMENTUM)
-        self.nam = NAMAttention(out_channels)
         self.relu = nn.ReLU(inplace=True)
         self.residual = residual
 
@@ -231,7 +251,7 @@ class Root(nn.Module):
         children = x
         x = self.conv(torch.cat(x, 1))
         x = self.bn(x)
-        x = self.nam(x)
+        
         if self.residual:
             x += children[0]
         x = self.relu(x)

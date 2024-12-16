@@ -90,7 +90,7 @@ class eca_layer(nn.Module):
 class MaxValueFusionECA(nn.Module):
     """Combine Max Value Fusion in Multi-Scale ECA without weighting."""
     
-    def __init__(self, channel, scales=[3, 5, 7]):
+    def __init__(self, channel, scales=[3, 5]):
         super(MaxValueFusionECA, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         

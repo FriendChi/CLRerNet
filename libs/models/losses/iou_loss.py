@@ -16,33 +16,59 @@ class CLRNetIoULoss(torch.nn.Module):
         self.lane_width = lane_width  # 车道半宽
 
 
-    def calc_iou(self, pred, target, pred_width, target_width):
+    def calc_iou(self, pred, target, pred_width, target_width,smooth_type='log',alpha=1.0):
         """
-        计算预测与目标之间的行 IoU 值。
+        计算带平滑距离惩罚的 DIoU 损失，同时移除无效点的影响。
         Args:
-            pred: 预测车道线，形状为 (Nl, Nr)，相对坐标。
-            target: 目标车道线，形状为 (Nl, Nr)，相对坐标。
+            pred: 预测车道线，形状为 (Nl, Nr)。
+            target: 目标车道线，形状为 (Nl, Nr)。
             pred_width: 预测线条的虚拟宽度，形状 (Nl, Nr)。
             target_width: 目标线条的虚拟宽度，形状 (Nl, Nr)。
+            alpha: 平滑系数。
+            smooth_type: 平滑方式，可选 'log', 'sqrt' 或其他。
         Returns:
-            torch.Tensor: 计算出的 IoU 值，形状为 (N)。
+            torch.Tensor: 计算出的 DIoU 损失。
         """
-        px1 = pred - pred_width  # 预测线的左边界
-        px2 = pred + pred_width  # 预测线的右边界
-        tx1 = target - target_width  # 目标线的左边界
-        tx2 = target + target_width  # 目标线的右边界
+        # 计算边界框
+        px1 = pred - pred_width
+        px2 = pred + pred_width
+        tx1 = target - target_width
+        tx2 = target + target_width
 
-        invalid_mask = target  # 标记无效目标点
-        # 去除无效点（坐标不在合法范围内）
-        invalid_masks = (invalid_mask < 0) | (invalid_mask >= 1.0)
-        ovr = torch.min(px2, tx2) - torch.max(px1, tx1)  # 计算交集宽度
-        union = torch.max(px2, tx2) - torch.min(px1, tx1)  # 计算并集宽度
+        # 标记无效点
+        invalid_mask = (target < 0) | (target >= 1.0)
 
+        # IoU 计算
+        ovr = torch.clamp(torch.min(px2, tx2) - torch.max(px1, tx1), min=0.0)
+        union = torch.clamp(torch.max(px2, tx2) - torch.min(px1, tx1), min=1e-9)
+        iou = ovr.sum(dim=-1) / union.sum(dim=-1)
+        iou[invalid_mask.all(dim=-1)] = 0.0  # 移除无效行的 IoU 影响
 
-        ovr[invalid_masks] = 0.0  # 无效点的交集设置为0
-        union[invalid_masks] = 0.0  # 无效点的并集设置为0
-        iou = ovr.sum(dim=-1) / (union.sum(dim=-1) + 1e-9)  # 计算 IoU 值
-        return iou
+        # 中心点距离
+        center_pred = (px1 + px2) / 2
+        center_target = (tx1 + tx2) / 2
+        center_distance = ((center_pred - center_target).pow(2).sum(dim=-1))
+        center_distance[invalid_mask.all(dim=-1)] = 0.0  # 无效行设置为 0
+
+        # 包围框距离
+        enclosing_left = torch.min(px1, tx1)
+        enclosing_right = torch.max(px2, tx2)
+        enclosing_distance = ((enclosing_right - enclosing_left).pow(2).sum(dim=-1) + 1e-9)
+        enclosing_distance[invalid_mask.all(dim=-1)] = 1.0  # 避免除以 0
+
+        # 平滑距离
+        if smooth_type == 'log':
+            smooth_distance = torch.log(1 + (center_distance / enclosing_distance))
+        elif smooth_type == 'sqrt':
+            smooth_distance = torch.sqrt(center_distance / enclosing_distance + 1e-6)
+        else:
+            raise ValueError("Unsupported smooth type")
+
+        # DIoU 计算
+        diou = iou - alpha * smooth_distance
+        diou[invalid_mask.all(dim=-1)] = 0.0  # 无效行的 DIoU 设置为 0
+
+        return diou
 
 
     def forward(self, pred, target):
@@ -106,28 +132,6 @@ class LaneIoULoss(CLRNetIoULoss):
 
         return pred_width, target_width
 
-    def distance_loss_weight(self,pred,weight_type="linear",alpha=1):
-        # 生成权重（基于采样点的索引）
-        Nr = pred.shape[1]
-        weights = torch.arange(Nr, device=pred.device).float()  # 采样点索引
-        
-        # 根据不同类型计算权重
-        if weight_type == 'linear':
-            weights = weights / Nr  # 线性权重
-        elif weight_type == 'exponential':
-            weights = torch.exp(-alpha * weights)  # 指数加权 较大的 alpha 会加大远处的权重
-        elif weight_type == 'polynomial':
-            weights = (1 - weights / Nr) ** alpha  # 多项式加权 较大的 alpha 会加大远处的权重
-        elif weight_type == 'cosine':
-            weights = torch.cos(torch.pi * weights / Nr)  # 余弦加权
-        elif weight_type == 'logarithmic':
-            weights = torch.log(1 + weights)  # 对数加权
-        else:
-            raise ValueError("Invalid weight_type. Choose from 'linear', 'exponential', 'polynomial'.")
-        
-        # 权重归一化
-        weights = weights / weights.sum()
-        return weights
 
     def forward(self, pred, target):
         """
@@ -143,5 +147,5 @@ class LaneIoULoss(CLRNetIoULoss):
         ), "prediction and target must have the same shape!"  # 确保预测和目标形状一致
         pred_width, target_width = self._calc_lane_width(pred, target)  # 动态计算宽度
         iou = self.calc_iou(pred, target, pred_width, target_width)  # 计算 IoU 值
-        distance_loss_w = self.distance_loss_weight(pred)
-        return (1 - iou).mean() * self.loss_weight*distance_loss_w  # 返回 IoU 损失
+        return (1 - iou).mean() * self.loss_weight  # 返回 IoU 损失
+

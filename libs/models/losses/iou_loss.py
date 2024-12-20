@@ -57,13 +57,9 @@ class CLRNetIoULoss(torch.nn.Module):
             (target >= 0) & (target < 1.0)   # 目标值合法
         ).sum(dim=-1)
 
-        for i,lane_iou in enumerate(iou):
-            if total_errors_per_lane[i] == 0:
-                continue
-            elif true_positive_count[i] == 0:
-                iou[i] -= iou.mean()
-            else:
-                iou[i] -= lane_iou*(total_errors_per_lane[i]/(true_positive_count[i] + 1e-9))
+        for i in range(len(iou)):
+            if true_positive_count[i] >total_errors_per_lane[i] and total_errors_per_lane[i]>0:
+                iou[i] = iou[i].clone()*(1-total_errors_per_lane[i]/(true_positive_count[i] + 1e-9))
                 # iou[i] -= (log(1+lane_iou*(total_errors_per_lane[i]/(true_positive_count[i] + 1e-9))))^2
                 # iou[i] -= 2*log(1+lane_iou*(total_errors_per_lane[i]/(true_positive_count[i] + 1e-9)))
                 # iou[i] -= log(1+lane_iou*(total_errors_per_lane[i]/(true_positive_count[i] + 1e-9)))

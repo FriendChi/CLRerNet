@@ -425,23 +425,25 @@ class CLRerNetFPN(nn.Module):
         """
         if type(inputs) == tuple:
             inputs = list(inputs)
-
+    
         assert len(inputs) >= len(self.in_channels)  # 4 > 3
-
+    
         if len(inputs) > len(self.in_channels):
             for _ in range(len(inputs) - len(self.in_channels)):
                 del inputs[0]
-
+    
         # build laterals
         laterals = [
-            torch.cat((self.conv0x_list[i](inputs[i + self.start_level]), self.conv0y_list[i](inputs[i + self.start_level])), dim=1)
+            torch.cat((self.conv0x_list[i](inputs[i + self.start_level]), 
+                       self.conv0y_list[i](inputs[i + self.start_level])), dim=1)
             for i in range(self.lateral_convs)
-        ]       
+        ]
+        
         laterals = [
             lateral_conv(laterals[i])
             for i, lateral_conv in enumerate(self.lateral_convs)
         ]
-
+    
         # build top-down path
         used_backbone_levels = len(laterals)
         for i in range(used_backbone_levels - 1, 0, -1):
@@ -449,6 +451,7 @@ class CLRerNetFPN(nn.Module):
             laterals[i - 1] += F.interpolate(
                 laterals[i], size=prev_shape, mode='nearest'
             )
-
+    
         outs = [self.fpn_convs[i](laterals[i]) for i in range(used_backbone_levels)]
         return tuple(outs)
+

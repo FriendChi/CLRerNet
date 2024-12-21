@@ -433,7 +433,7 @@ class CLRerNetFPN(nn.Module):
                 del inputs[0]
 
         # build laterals
-         laterals = [
+        laterals = [
             torch.cat((self.conv0x_list[i](inputs[i + self.start_level]), self.conv0y_list[i](inputs[i + self.start_level])), dim=1)
             for i in range(self.lateral_convs)
         ]       

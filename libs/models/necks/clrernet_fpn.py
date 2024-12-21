@@ -366,7 +366,7 @@ class CLRerNetFPN(nn.Module):
 
         self.backbone_end_level = self.num_ins
         self.start_level = 0
-        # self.lateral_convs = nn.ModuleList()
+        self.lateral_convs = nn.ModuleList()
         self.fpn_convs = nn.ModuleList()
         self.conv0x_list = nn.ModuleList()
         self.conv0y_list = nn.ModuleList()
@@ -376,25 +376,25 @@ class CLRerNetFPN(nn.Module):
         for i in range(self.start_level, self.backbone_end_level):
             conv0x = DSConv_pro(
                 in_channels[i],
-                out_channels//2,
+                out_channels,
                 3,
                 0,
             )
             conv0y = DSConv_pro(
                 in_channels[i],
-                out_channels//2,
+                out_channels,
                 3,
                 1,
             )
-            # l_conv = ConvModule(
-            #     2*in_channels[i],
-            #     out_channels,
-            #     1,
-            #     conv_cfg=None,
-            #     norm_cfg=None,
-            #     act_cfg=None,
-            #     inplace=False,
-            # )
+            l_conv = ConvModule(
+                2*in_channels[i],
+                out_channels,
+                1,
+                conv_cfg=None,
+                norm_cfg=None,
+                act_cfg=None,
+                inplace=False,
+            )
             fpn_conv = ConvModule(
                 out_channels,
                 out_channels,
@@ -406,7 +406,7 @@ class CLRerNetFPN(nn.Module):
                 inplace=False,
             )
 
-            # self.lateral_convs.append(l_conv)
+            self.lateral_convs.append(l_conv)
             self.fpn_convs.append(fpn_conv)
             self.conv0x_list.append(conv0x)
             self.conv0y_list.append(conv0y)
@@ -437,9 +437,9 @@ class CLRerNetFPN(nn.Module):
             torch.cat((self.conv0x_list[i](inputs[i + self.start_level]), self.conv0y_list[i](inputs[i + self.start_level])), dim=1) for i in range(len(self.lateral_convs))
         ]
         
-        # laterals = [
-        #     lateral_conv(laterals[i]) for i, lateral_conv in enumerate(self.lateral_convs)
-        # ]
+        laterals = [
+            lateral_conv(laterals[i]) for i, lateral_conv in enumerate(self.lateral_convs)
+        ]
     
         # build top-down path
         used_backbone_levels = len(laterals)

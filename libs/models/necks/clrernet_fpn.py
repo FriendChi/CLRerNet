@@ -433,12 +433,12 @@ class CLRerNetFPN(nn.Module):
                 del inputs[0]
     
         # build laterals
-        laterals = [
+        lateral = [
             torch.cat((self.conv0x_list[i](inputs[i + self.start_level]), self.conv0y_list[i](inputs[i + self.start_level])), dim=1) for i in range(len(self.lateral_convs))
         ]
         
         laterals = [
-            lateral_conv(laterals[i]) for i, lateral_conv in enumerate(self.lateral_convs)
+            lateral_conv(lateral[i]) for i, lateral_conv in enumerate(self.lateral_convs)
         ]
     
         # build top-down path

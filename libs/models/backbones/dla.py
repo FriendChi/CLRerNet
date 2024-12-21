@@ -122,7 +122,7 @@ class MaxValueFusionECA(nn.Module):
         max_value_fusion, _ = torch.max(reshaped_output, dim=2, keepdim=True)  # Shape: [B, C, 1, 1]
 
         # Apply sigmoid and return the final output
-        attention = self.sigmoid(max_value_fusion)  # Shape: [B, C, 1, 1]
+        attention = self.sigmoid(max_value_fusion.squeeze(-1))  # Shape: [B, C, 1, 1]
         return x * attention.expand_as(x)  # Apply attention to the original input
 
 class BasicBlock(nn.Module):

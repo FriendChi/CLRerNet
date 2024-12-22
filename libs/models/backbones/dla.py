@@ -31,99 +31,35 @@ def conv3x3(in_planes, out_planes, stride=1):
         in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False
     )
 
-class Channel_Att(nn.Module):
-    def __init__(self, channels):
-        super(Channel_Att, self).__init__()
-        self.channels = channels
+class EMA(nn.Module):  # 定义一个继承自 nn.Module 的 EMA 类
+    def __init__(self, channels, c2=None, factor=32):  # 构造函数，初始化对象
+        super(EMA, self).__init__()  # 调用父类的构造函数
+        self.groups = factor  # 定义组的数量为 factor，默认值为 32
+        assert channels // self.groups > 0  # 确保通道数可以被组数整除
+        self.softmax = nn.Softmax(-1)  # 定义 softmax 层，用于最后一个维度
+        self.agp = nn.AdaptiveAvgPool2d((1, 1))  # 定义自适应平均池化层，输出大小为 1x1
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))  # 定义自适应平均池化层，只在宽度上池化
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))  # 定义自适应平均池化层，只在高度上池化
+        self.gn = nn.GroupNorm(channels // self.groups, channels // self.groups)  # 定义组归一化层
+        self.conv1x1 = nn.Conv2d(channels // self.groups, channels // self.groups, kernel_size=1, stride=1, padding=0)  # 定义 1x1 卷积层
+        self.conv3x3 = nn.Conv2d(channels // self.groups, channels // self.groups, kernel_size=3, stride=1, padding=1)  # 定义 3x3 卷积层
+ 
+    def forward(self, x):  # 定义前向传播函数
+        b, c, h, w = x.size()  # 获取输入张量的大小：批次、通道、高度和宽度
+        group_x = x.reshape(b * self.groups, -1, h, w)  # 将输入张量重新形状为 (b * 组数, c // 组数, 高度, 宽度)
+        x_h = self.pool_h(group_x)  # 在高度上进行池化
+        x_w = self.pool_w(group_x).permute(0, 1, 3, 2)  # 在宽度上进行池化并交换维度
+        hw = self.conv1x1(torch.cat([x_h, x_w], dim=2))  # 将池化结果拼接并通过 1x1 卷积层
+        x_h, x_w = torch.split(hw, [h, w], dim=2)  # 将卷积结果按高度和宽度分割
+        x1 = self.gn(group_x * x_h.sigmoid() * x_w.permute(0, 1, 3, 2).sigmoid())  # 进行组归一化，并结合高度和宽度的激活结果
+        x2 = self.conv3x3(group_x)  # 通过 3x3 卷积层
+        x11 = self.softmax(self.agp(x1).reshape(b * self.groups, -1, 1).permute(0, 2, 1))  # 对 x1 进行池化、形状变换、并应用 softmax
+        x12 = x2.reshape(b * self.groups, c // self.groups, -1)  # 将 x2 重新形状为 (b * 组数, c // 组数, 高度 * 宽度)
+        x21 = self.softmax(self.agp(x2).reshape(b * self.groups, -1, 1).permute(0, 2, 1))  # 对 x2 进行池化、形状变换、并应用 softmax
+        x22 = x1.reshape(b * self.groups, c // self.groups, -1)  # 将 x1 重新形状为 (b * 组数, c // 组数, 高度 * 宽度)
+        weights = (torch.matmul(x11, x12) + torch.matmul(x21, x22)).reshape(b * self.groups, 1, h, w)  # 计算权重
+        return (group_x * weights.sigmoid()).reshape(b, c, h, w)  # 应用权重并将形状恢复为原始大小
 
-        self.bn2 = nn.BatchNorm2d(self.channels, affine=True)
-
-    def forward(self, x):
-        residual = x
-
-        x = self.bn2(x)
-        weight_bn = self.bn2.weight.data.abs() / torch.sum(self.bn2.weight.data.abs())
-        x = x.permute(0, 2, 3, 1).contiguous()
-        x = torch.mul(weight_bn, x)
-        x = x.permute(0, 3, 1, 2).contiguous()
-
-        x = torch.sigmoid(x) * residual  #
-
-        return x
-
-
-class NAMAttention(nn.Module):
-    def __init__(self, channels):
-        super(NAMAttention, self).__init__()
-        self.Channel_Att = Channel_Att(channels)
-
-    def forward(self, x):
-        x_out1 = self.Channel_Att(x)
-
-        return x_out1
-
-class eca_layer(nn.Module):
-    """Constructs a ECA module.
-
-    Args:
-        channel: Number of channels of the input feature map
-        k_size: Adaptive selection of kernel size
-    """
-    def __init__(self, channel, k_size=3):
-        super(eca_layer, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.conv = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1) // 2, bias=False) 
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        # feature descriptor on the global spatial information
-        y = self.avg_pool(x)
-
-        # Two different branches of ECA module
-        y = self.conv(y.squeeze(-1).transpose(-1, -2)).transpose(-1, -2).unsqueeze(-1)
-
-        # Multi-scale information fusion
-        y = self.sigmoid(y)
-
-        return x * y.expand_as(x)
-
-class MaxValueFusionECA(nn.Module):
-    """Combine Max Value Fusion in Multi-Scale ECA without weighting."""
-    
-    def __init__(self, channel, scales=[3, 5, 7]):
-        super(MaxValueFusionECA, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        
-        # Create multiple convolutions for different scales (kernel sizes)
-        self.convs = nn.ModuleList([
-            nn.Conv1d(1, 1, kernel_size=scale, padding=(scale - 1) // 2, bias=False)
-            for scale in scales
-        ])
-        
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        # Global average pooling to get channel-wise feature descriptors
-        y = self.avg_pool(x)  # Shape: [B, C, 1, 1]
-        
-        # Apply different convolutions to capture multi-scale features
-        scale_outputs = []
-        for conv in self.convs:
-            scale_output = conv(y.squeeze(-1).transpose(-1, -2)).transpose(-1, -2).unsqueeze(-1)
-            scale_outputs.append(scale_output)
-        
-        # Concatenate outputs from different scales
-        concatenated_output = torch.cat(scale_outputs, dim=1)  # Shape: [B, n*C, 1, 1]
-
-        # Reshape to [B, C, n, 1, 1] so we can take the max for each channel across different scales
-        reshaped_output = concatenated_output.view(concatenated_output.size(0), -1, len(self.convs), 1, 1)  # [B, C, n, 1, 1]
-        
-        # Now for each channel, select the maximum value across the n scales
-        max_value_fusion, _ = torch.max(reshaped_output, dim=2, keepdim=True)  # Shape: [B, C, 1, 1]
-
-        # Apply sigmoid and return the final output
-        attention = self.sigmoid(max_value_fusion.squeeze(-1))  # Shape: [B, C, 1, 1]
-        return x * attention.expand_as(x)  # Apply attention to the original input
 
 class BasicBlock(nn.Module):
     def __init__(self, inplanes, planes, stride=1, dilation=1):
@@ -148,7 +84,7 @@ class BasicBlock(nn.Module):
             bias=False,
             dilation=dilation,
         )
-        self.eca = MaxValueFusionECA(planes)
+        self.eca = EMA(planes)
         self.bn2 = nn.BatchNorm2d(planes, momentum=BN_MOMENTUM)
         self.stride = stride
 

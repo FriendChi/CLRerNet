@@ -31,7 +31,7 @@ def act_layer(act, inplace=False, neg_slope=0.2, n_prelu=1):
 
 class LGAG(nn.Module):
     def __init__(self, F_g, F_l, F_int, kernel_size=3, groups=1, activation='relu'):
-        super(LGAG,self).__init__()
+        super(LGAG, self).__init__()
 
         if kernel_size == 1:
             groups = 1
@@ -44,21 +44,30 @@ class LGAG(nn.Module):
             nn.BatchNorm2d(F_int)
         )
         self.psi = nn.Sequential(
-            nn.Conv2d(F_int, 1, kernel_size=1,stride=1,padding=0,bias=True),
+            nn.Conv2d(F_int, 1, kernel_size=1, stride=1, padding=0, bias=True),
             nn.BatchNorm2d(1),
             nn.Sigmoid()
         )
         self.activation = act_layer(activation, inplace=True)
 
-    
-                
+        # Fast Normalized Fusion parameters
+        self.w_g = nn.Parameter(torch.tensor(1.0))  # 初始化全局特征权重
+        self.w_x = nn.Parameter(torch.tensor(1.0))  # 初始化局部特征权重
+        self.epsilon = 1e-6  # 防止归一化数值不稳定
+
     def forward(self, g, x):
         g1 = self.W_g(g)
         x1 = self.W_x(x)
-        psi = self.activation(g1 + x1)
+
+        # Fast Normalized Fusion
+        fused = self.w_g * g1 + self.w_x * x1
+        fused_norm = fused / (torch.norm(fused, p=2, dim=1, keepdim=True) + self.epsilon)
+
+        psi = self.activation(fused_norm)
         psi = self.psi(psi)
 
-        return x*psi
+        return x * psi
+
 
 
 @NECKS.register_module

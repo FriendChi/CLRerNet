@@ -10,6 +10,23 @@ import torch.nn.functional as F
 from mmcv.cnn import ConvModule
 from mmdet.models.builder import NECKS
 
+class Block(nn.Module):
+    def __init__(self, dim, mlp_ratio=4., drop_path=0.):
+        super().__init__()
+        
+        self.attn = ConvMod(dim)
+        self.mlp = MLP(dim, mlp_ratio)
+        layer_scale_init_value = 1e-6           
+        self.layer_scale_1 = nn.Parameter(
+            layer_scale_init_value * torch.ones((dim)), requires_grad=True)
+        self.layer_scale_2 = nn.Parameter(
+            layer_scale_init_value * torch.ones((dim)), requires_grad=True)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+    def forward(self, x):
+        x = x + self.drop_path(self.layer_scale_1.unsqueeze(-1).unsqueeze(-1) * self.attn(x))
+        x = x + self.drop_path(self.layer_scale_2.unsqueeze(-1).unsqueeze(-1) * self.mlp(x))
+        return x
 
 @NECKS.register_module
 class CLRerNetFPN(nn.Module):
@@ -27,7 +44,7 @@ class CLRerNetFPN(nn.Module):
         self.out_channels = out_channels
         self.num_ins = len(in_channels)
         self.num_outs = num_outs
-
+        self.att = Block(out_channels)
         self.backbone_end_level = self.num_ins
         self.start_level = 0
         self.lateral_convs = nn.ModuleList()
@@ -84,6 +101,8 @@ class CLRerNetFPN(nn.Module):
             lateral_conv(inputs[i + self.start_level])
             for i, lateral_conv in enumerate(self.lateral_convs)
         ]
+
+        laterals[-1] = self.att(laterals[-1])
 
         # build top-down path
         used_backbone_levels = len(laterals)

@@ -49,7 +49,8 @@ class SegDecoder(nn.Module):
 
     def forward(self, x):
         x = self.dropout(x)
-        x = self.mlka(x)
+        x_1 = self.mlka(x)
+        x+=x_1
         x = self.conv(x)
         x = F.interpolate(
             x,

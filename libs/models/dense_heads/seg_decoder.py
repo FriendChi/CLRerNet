@@ -147,7 +147,7 @@ class SegDecoder(nn.Module):
         self.conv = nn.Conv2d(prior_feat_channels * refine_layers, num_classes, 1)
         self.image_height = image_height
         self.image_width = image_width
-        self.mlka = MultiSpectralAttentionLayer(prior_feat_channels * refine_layers,8)
+        self.mlka = MultiSpectralAttentionLayer(prior_feat_channels * refine_layers,40,100)
 
     def forward(self, x):
         x = self.dropout(x)

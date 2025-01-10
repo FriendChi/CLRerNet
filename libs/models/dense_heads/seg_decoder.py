@@ -1,28 +1,38 @@
 import torch.nn.functional as F
 from torch import nn
 
-class SE_Block(nn.Module):
-    def __init__(self, inchannel, ratio=16):
-        super(SE_Block, self).__init__()
-        # 全局平均池化(Fsq操作)
-        self.gap = nn.AdaptiveAvgPool2d((1, 1))
-        # 两个全连接层(Fex操作)
-        self.fc = nn.Sequential(
-            nn.Linear(inchannel, inchannel // ratio, bias=False),  # 从 c -> c/r
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DynamicSmoothAttention(nn.Module):
+    def __init__(self, channel, reduction=4):
+        super(DynamicSmoothAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)  # 全局平均池化
+        self.mlp = nn.Sequential(
+            nn.Linear(channel, channel // reduction),
             nn.ReLU(),
-            nn.Linear(inchannel // ratio, inchannel, bias=False),  # 从 c/r -> c
-            nn.Sigmoid()
+            nn.Linear(channel // reduction, 1),
+            nn.Sigmoid()  # 将缩放因子限制在 [0, 1] 范围内
         )
- 
+
     def forward(self, x):
-            # 读取批数据图片数量及通道数
-            b, c, h, w = x.size()
-            # Fsq操作：经池化后输出b*c的矩阵
-            y = self.gap(x).view(b, c)
-            # Fex操作：经全连接层输出（b，c，1，1）矩阵
-            y = self.fc(y).view(b, c, 1, 1)
-            # Fscale操作：将得到的权重乘以原来的特征图x
-            return x * y.expand_as(x)
+        # 全局平均池化，得到每个通道的平均值
+        mu = self.avg_pool(x).squeeze(-1).squeeze(-1)  # [B, C]
+        
+        # 动态生成缩放因子
+        alpha = self.mlp(mu).unsqueeze(-1).unsqueeze(-1)  # [B, C, 1, 1]
+        
+        # 缩小小于平均值的元素
+        mask = (x < mu.unsqueeze(-1).unsqueeze(-1)).float()  # 小于平均值的元素掩码
+        x_scaled = x * (1 - mask) + x * mask * alpha  # 缩小小于平均值的元素
+        
+        # 归一化 x_scaled 得到注意力权重
+        attention = F.softmax(x_scaled.view(x.size(0), x.size(1), -1), dim=-1)  # [B, C, H*W]
+        attention = attention.view_as(x)  # [B, C, H, W]
+        
+        # 应用注意力权重
+        return x * attention  # [B, C, H, W]
 
 class SegDecoder(nn.Module):
     """
@@ -44,7 +54,7 @@ class SegDecoder(nn.Module):
         self.conv = nn.Conv2d(prior_feat_channels * refine_layers, num_classes, 1)
         self.image_height = image_height
         self.image_width = image_width
-        self.mlka = SE_Block(prior_feat_channels * refine_layers)
+        self.mlka = DynamicSmoothAttention(prior_feat_channels * refine_layers)
 
     def forward(self, x):
         x = self.dropout(x)

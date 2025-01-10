@@ -8,123 +8,123 @@ import torch.nn as nn
 from einops import rearrange
 
 
-class SCSA(nn.Module):
+import math
+import torch
+import torch.nn as nn
 
-    def __init__(
-            self,
-            dim: int,
-            head_num: int,
-            window_size: int = 7,
-            group_kernel_sizes: t.List[int] = [3, 5, 7, 9],
-            qkv_bias: bool = False,
-            fuse_bn: bool = False,
-            down_sample_mode: str = 'avg_pool',
-            attn_drop_ratio: float = 0.,
-            gate_layer: str = 'sigmoid',
-    ):
-        super(SCSA, self).__init__()
-        self.dim = dim
-        self.head_num = head_num
-        self.head_dim = dim // head_num
-        self.scaler = self.head_dim ** -0.5
-        self.group_kernel_sizes = group_kernel_sizes
-        self.window_size = window_size
-        self.qkv_bias = qkv_bias
-        self.fuse_bn = fuse_bn
-        self.down_sample_mode = down_sample_mode
-        assert self.dim // 4, 'The dimension of input feature should be divisible by 4.'
-        self.group_chans = group_chans = self.dim // 4
-        self.local_dwc = nn.Conv1d(group_chans, group_chans, kernel_size=group_kernel_sizes[0],
-                                   padding=group_kernel_sizes[0] // 2, groups=group_chans)
-        self.global_dwc_s = nn.Conv1d(group_chans, group_chans, kernel_size=group_kernel_sizes[1],
-                                      padding=group_kernel_sizes[1] // 2, groups=group_chans)
-        self.global_dwc_m = nn.Conv1d(group_chans, group_chans, kernel_size=group_kernel_sizes[2],
-                                      padding=group_kernel_sizes[2] // 2, groups=group_chans)
-        self.global_dwc_l = nn.Conv1d(group_chans, group_chans, kernel_size=group_kernel_sizes[3],
-                                      padding=group_kernel_sizes[3] // 2, groups=group_chans)
-        self.sa_gate = nn.Softmax(dim=2) if gate_layer == 'softmax' else nn.Sigmoid()
-        self.norm_h = nn.GroupNorm(4, dim)
-        self.norm_w = nn.GroupNorm(4, dim)
-        self.conv_d = nn.Identity()
-        self.norm = nn.GroupNorm(1, dim)
-        self.q = nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=1, bias=qkv_bias, groups=dim)
-        self.k = nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=1, bias=qkv_bias, groups=dim)
-        self.v = nn.Conv2d(in_channels=dim, out_channels=dim, kernel_size=1, bias=qkv_bias, groups=dim)
-        self.attn_drop = nn.Dropout(attn_drop_ratio)
-        self.ca_gate = nn.Softmax(dim=1) if gate_layer == 'softmax' else nn.Sigmoid()
+def get_freq_indices(method):
+    assert method in ['top1','top2','top4','top8','top16','top32',
+                      'bot1','bot2','bot4','bot8','bot16','bot32',
+                      'low1','low2','low4','low8','low16','low32']
+    num_freq = int(method[3:])
+    if 'top' in method:
+        all_top_indices_x = [0,0,6,0,0,1,1,4,5,1,3,0,0,0,3,2,4,6,3,5,5,2,6,5,5,3,3,4,2,2,6,1]
+        all_top_indices_y = [0,1,0,5,2,0,2,0,0,6,0,4,6,3,5,2,6,3,3,3,5,1,1,2,4,2,1,1,3,0,5,3]
+        mapper_x = all_top_indices_x[:num_freq]
+        mapper_y = all_top_indices_y[:num_freq]
+    elif 'low' in method:
+        all_low_indices_x = [0,0,1,1,0,2,2,1,2,0,3,4,0,1,3,0,1,2,3,4,5,0,1,2,3,4,5,6,1,2,3,4]
+        all_low_indices_y = [0,1,0,1,2,0,1,2,2,3,0,0,4,3,1,5,4,3,2,1,0,6,5,4,3,2,1,0,6,5,4,3]
+        mapper_x = all_low_indices_x[:num_freq]
+        mapper_y = all_low_indices_y[:num_freq]
+    elif 'bot' in method:
+        all_bot_indices_x = [6,1,3,3,2,4,1,2,4,4,5,1,4,6,2,5,6,1,6,2,2,4,3,3,5,5,6,2,5,5,3,6]
+        all_bot_indices_y = [6,4,4,6,6,3,1,4,4,5,6,5,2,2,5,1,4,3,5,0,3,1,1,2,4,2,1,1,5,3,3,3]
+        mapper_x = all_bot_indices_x[:num_freq]
+        mapper_y = all_bot_indices_y[:num_freq]
+    else:
+        raise NotImplementedError
+    return mapper_x, mapper_y
 
-        if window_size == -1:
-            self.down_func = nn.AdaptiveAvgPool2d((1, 1))
+class MultiSpectralAttentionLayer(torch.nn.Module):
+    def __init__(self, channel, dct_h, dct_w, reduction = 16, freq_sel_method = 'top16'):
+        super(MultiSpectralAttentionLayer, self).__init__()
+        self.reduction = reduction
+        self.dct_h = dct_h
+        self.dct_w = dct_w
+
+        mapper_x, mapper_y = get_freq_indices(freq_sel_method)
+        self.num_split = len(mapper_x)
+        mapper_x = [temp_x * (dct_h // 7) for temp_x in mapper_x] 
+        mapper_y = [temp_y * (dct_w // 7) for temp_y in mapper_y]
+        # make the frequencies in different sizes are identical to a 7x7 frequency space
+        # eg, (2,2) in 14x14 is identical to (1,1) in 7x7
+
+        self.dct_layer = MultiSpectralDCTLayer(dct_h, dct_w, mapper_x, mapper_y, channel)
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // reduction, channel, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        n,c,h,w = x.shape
+        x_pooled = x
+        if h != self.dct_h or w != self.dct_w:
+            x_pooled = torch.nn.functional.adaptive_avg_pool2d(x, (self.dct_h, self.dct_w))
+            # If you have concerns about one-line-change, don't worry.   :)
+            # In the ImageNet models, this line will never be triggered. 
+            # This is for compatibility in instance segmentation and object detection.
+        y = self.dct_layer(x_pooled)
+
+        y = self.fc(y).view(n, c, 1, 1)
+        return x * y.expand_as(x)
+
+
+class MultiSpectralDCTLayer(nn.Module):
+    """
+    Generate dct filters
+    """
+    def __init__(self, height, width, mapper_x, mapper_y, channel):
+        super(MultiSpectralDCTLayer, self).__init__()
+        
+        assert len(mapper_x) == len(mapper_y)
+        assert channel % len(mapper_x) == 0
+
+        self.num_freq = len(mapper_x)
+
+        # fixed DCT init
+        self.register_buffer('weight', self.get_dct_filter(height, width, mapper_x, mapper_y, channel))
+        
+        # fixed random init
+        # self.register_buffer('weight', torch.rand(channel, height, width))
+
+        # learnable DCT init
+        # self.register_parameter('weight', self.get_dct_filter(height, width, mapper_x, mapper_y, channel))
+        
+        # learnable random init
+        # self.register_parameter('weight', torch.rand(channel, height, width))
+
+        # num_freq, h, w
+
+    def forward(self, x):
+        assert len(x.shape) == 4, 'x must been 4 dimensions, but got ' + str(len(x.shape))
+        # n, c, h, w = x.shape
+
+        x = x * self.weight
+
+        result = torch.sum(x, dim=[2,3])
+        return result
+
+    def build_filter(self, pos, freq, POS):
+        result = math.cos(math.pi * freq * (pos + 0.5) / POS) / math.sqrt(POS) 
+        if freq == 0:
+            return result
         else:
-            if down_sample_mode == 'recombination':
-                self.down_func = self.space_to_chans
-                # dimensionality reduction
-                self.conv_d = nn.Conv2d(in_channels=dim * window_size ** 2, out_channels=dim, kernel_size=1, bias=False)
-            elif down_sample_mode == 'avg_pool':
-                self.down_func = nn.AvgPool2d(kernel_size=(window_size, window_size), stride=window_size)
-            elif down_sample_mode == 'max_pool':
-                self.down_func = nn.MaxPool2d(kernel_size=(window_size, window_size), stride=window_size)
+            return result * math.sqrt(2)
+    
+    def get_dct_filter(self, tile_size_x, tile_size_y, mapper_x, mapper_y, channel):
+        dct_filter = torch.zeros(channel, tile_size_x, tile_size_y)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        The dim of x is (B, C, H, W)
-        """
-        # Spatial attention priority calculation
-        b, c, h_, w_ = x.size()
-        # (B, C, H)
-        x_h = x.mean(dim=3)
-        l_x_h, g_x_h_s, g_x_h_m, g_x_h_l = torch.split(x_h, self.group_chans, dim=1)
-        # (B, C, W)
-        x_w = x.mean(dim=2)
-        l_x_w, g_x_w_s, g_x_w_m, g_x_w_l = torch.split(x_w, self.group_chans, dim=1)
+        c_part = channel // len(mapper_x)
 
-        x_h_attn = self.sa_gate(self.norm_h(torch.cat((
-            self.local_dwc(l_x_h),
-            self.global_dwc_s(g_x_h_s),
-            self.global_dwc_m(g_x_h_m),
-            self.global_dwc_l(g_x_h_l),
-        ), dim=1)))
-        x_h_attn = x_h_attn.view(b, c, h_, 1)
-
-        x_w_attn = self.sa_gate(self.norm_w(torch.cat((
-            self.local_dwc(l_x_w),
-            self.global_dwc_s(g_x_w_s),
-            self.global_dwc_m(g_x_w_m),
-            self.global_dwc_l(g_x_w_l)
-        ), dim=1)))
-        x_w_attn = x_w_attn.view(b, c, 1, w_)
-
-        x = x * x_h_attn * x_w_attn
-
-        # Channel attention based on self attention
-        # reduce calculations
-        y = self.down_func(x)
-        y = self.conv_d(y)
-        _, _, h_, w_ = y.size()
-
-        # normalization first, then reshape -> (B, H, W, C) -> (B, C, H * W) and generate q, k and v
-        y = self.norm(y)
-        q = self.q(y)
-        k = self.k(y)
-        v = self.v(y)
-        # (B, C, H, W) -> (B, head_num, head_dim, N)
-        q = rearrange(q, 'b (head_num head_dim) h w -> b head_num head_dim (h w)', head_num=int(self.head_num),
-                      head_dim=int(self.head_dim))
-        k = rearrange(k, 'b (head_num head_dim) h w -> b head_num head_dim (h w)', head_num=int(self.head_num),
-                      head_dim=int(self.head_dim))
-        v = rearrange(v, 'b (head_num head_dim) h w -> b head_num head_dim (h w)', head_num=int(self.head_num),
-                      head_dim=int(self.head_dim))
-        # (B, head_num, head_dim, head_dim)
-        attn = q @ k.transpose(-2, -1) * self.scaler
-        attn = self.attn_drop(attn.softmax(dim=-1))
-        # (B, head_num, head_dim, N)
-        attn = attn @ v
-        # (B, C, H_, W_)
-        attn = rearrange(attn, 'b head_num head_dim (h w) -> b (head_num head_dim) h w', h=int(h_), w=int(w_))
-        # (B, C, 1, 1)
-        attn = attn.mean((2, 3), keepdim=True)
-        attn = self.ca_gate(attn)
-        return attn * x
+        for i, (u_x, v_y) in enumerate(zip(mapper_x, mapper_y)):
+            for t_x in range(tile_size_x):
+                for t_y in range(tile_size_y):
+                    dct_filter[i * c_part: (i+1)*c_part, t_x, t_y] = self.build_filter(t_x, u_x, tile_size_x) * self.build_filter(t_y, v_y, tile_size_y)
+                        
+        return dct_filter
 
 
 class SegDecoder(nn.Module):
@@ -147,7 +147,7 @@ class SegDecoder(nn.Module):
         self.conv = nn.Conv2d(prior_feat_channels * refine_layers, num_classes, 1)
         self.image_height = image_height
         self.image_width = image_width
-        self.mlka = SCSA(prior_feat_channels * refine_layers,8)
+        self.mlka = MultiSpectralAttentionLayer(prior_feat_channels * refine_layers,8)
 
     def forward(self, x):
         x = self.dropout(x)
